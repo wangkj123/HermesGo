@@ -1,0 +1,22 @@
+# Codex Plugin Configuration
+# This file configures Codex plugin to use the same rules as Cursor
+# Codex will automatically read .cursorrules file from project root
+
+# Rules file location (relative to project root)
+rules_file: ".cursorrules"
+
+# System prompt files (Codex will automatically read these files)
+# These files instruct Codex to read .cursorrules file
+system_prompt_files:
+  - ".codex-system-prompt"
+
+# Auto-load rules
+auto_load_rules: true
+
+# Share rules with Cursor
+share_with_cursor: true
+
+# Instructions for Codex
+# Codex should read .cursorrules file from project root on every conversation
+instructions: |
+  IMPORTANT: Read and apply all rules from .cursorrules file!

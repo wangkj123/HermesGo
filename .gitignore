@@ -1,0 +1,48 @@
+# HermesGo source control boundaries
+
+# Release and packaging outputs
+create_hermes_go/output/
+hermes-release/
+tools/mingit/
+
+# Runtime binaries and bundled dependencies
+HermesGo/runtime/python311/
+HermesGo/runtime/ollama/
+HermesGo/runtime/hermes-agent/venv/
+HermesGo/runtime/hermes-agent/web/node_modules/
+HermesGo/runtime/hermes-agent/web_dist/
+HermesGo/runtime/hermes-agent/hermes_cli/web_dist/
+HermesGo/runtime/hermes-agent/hermes_agent.egg-info/
+HermesGo/runtime/hermes-agent-src/
+
+# Runtime data and state
+HermesGo/home/
+HermesGo/data/hermes/
+HermesGo/data/ollama/models/
+HermesGo/HermesGo-debug.txt
+HermesGo/installers/Pinokio/Pinokio.download
+workflow/runs/
+
+# Generated caches and logs
+logs/
+HermesGo/logs/
+1.txt
+exports-pinokio-download.html
+HermesGo/runtime/hermes-agent/__pycache__/
+HermesGo/runtime/hermes-agent/**/*.pyc
+HermesGo/runtime/hermes-agent/**/*.pyo
+HermesGo/runtime/hermes-agent/**/*.pyd
+HermesGo/runtime/hermes-agent/**/*.exe
+HermesGo/runtime/hermes-agent/**/*.dll
+HermesGo/runtime/hermes-agent/**/*.zip
+HermesGo/runtime/hermes-agent/**/*.whl
+HermesGo/**/*.pyc
+HermesGo/**/*.pyo
+HermesGo/**/*.pyd
+HermesGo/**/*.exe
+HermesGo/**/*.dll
+HermesGo/**/*.zip
+HermesGo/**/*.whl
+
+# Local builder caches
+create_hermes_go/cache/

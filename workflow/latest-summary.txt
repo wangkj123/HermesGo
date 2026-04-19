@@ -1,0 +1,16 @@
+AutoDevFlow Latest Result
+
+Project: HermesGo
+Goal: Rebuild HermesGo team-style automation flow
+RunId: 20260416-111351
+RunDir: E:\AI\hermes\workflow\runs\20260416-111351-HermesGo
+ReviewDecision: approve
+
+Open these files:
+- E:\AI\hermes\workflow\runs\20260416-111351-HermesGo\07-summary.md
+- E:\AI\hermes\workflow\runs\20260416-111351-HermesGo\06-review.md
+- E:\AI\hermes\workflow\runs\20260416-111351-HermesGo\05-verification.md
+- E:\AI\hermes\workflow\runs\20260416-111351-HermesGo\verification-output.log
+
+Open this folder:
+- E:\AI\hermes\workflow\runs\20260416-111351-HermesGo

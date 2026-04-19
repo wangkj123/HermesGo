@@ -1,0 +1,8 @@
+# Codex system prompt (single)
+
+On every conversation start:
+- Read `.cursorrules` from the project root.
+- If `.cursor/rules/*.mdc` exists, read the applicable files too.
+- Apply all rules strictly.
+
+This is the only Codex auto-read prompt file in this repo.
