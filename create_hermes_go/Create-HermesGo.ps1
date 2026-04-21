@@ -338,6 +338,69 @@ function Prune-PortablePackage {
     }
 }
 
+function Get-FrameworkCscPath {
+    $candidates = @(
+        (Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+        (Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    throw "Unable to locate csc.exe."
+}
+
+function Build-HermesGoExe {
+    param(
+        [string]$SourcePath,
+        [string]$OutputPath
+    )
+
+    $csc = Get-FrameworkCscPath
+    $frameworkDir = Split-Path -Parent $csc
+    $referencePaths = @(
+        (Join-Path $frameworkDir "System.dll"),
+        (Join-Path $frameworkDir "System.Core.dll"),
+        (Join-Path $frameworkDir "System.Net.Http.dll"),
+        (Join-Path $frameworkDir "System.IO.Compression.dll"),
+        (Join-Path $frameworkDir "System.IO.Compression.FileSystem.dll")
+    )
+
+    foreach ($referencePath in $referencePaths) {
+        if (-not (Test-Path -LiteralPath $referencePath)) {
+            throw "Required compiler reference missing: $referencePath"
+        }
+    }
+
+    $arguments = @(
+        "/nologo",
+        "/target:winexe",
+        "/langversion:5",
+        "/optimize+",
+        "/platform:anycpu",
+        ("/out:{0}" -f $OutputPath)
+    )
+
+    foreach ($referencePath in $referencePaths) {
+        $arguments += ("/reference:{0}" -f $referencePath)
+    }
+
+    $arguments += $SourcePath
+
+    Write-Step "Compiling HermesGo.exe from $SourcePath"
+    & $csc @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "csc.exe failed with exit code $LASTEXITCODE"
+    }
+
+    if (-not (Test-Path -LiteralPath $OutputPath)) {
+        throw "HermesGo.exe was not created at $OutputPath"
+    }
+}
+
 function Get-OllamaManifestRelativePath {
     param([string]$ModelName)
 
@@ -1264,10 +1327,11 @@ $packageReadme = @'
 # HermesGo
 
 这是一个单目录的 Windows Hermes 包。
+交付时请直接把整个 `create_hermes_go/output/HermesGo` 目录拷贝出去使用，不要拆文件。
 
 ## 当前目标
 
-- 启动官方 Hermes v0.9.0 代码
+- 启动官方 Hermes v0.10.0 代码
 - 启动官方 Hermes Dashboard
 - 默认走本地模型路线，不依赖云端 token
 - 默认自带 `data/ollama/models`，断网也能直接用
@@ -1304,6 +1368,7 @@ $packageReadme = @'
 - 便携 Python 来源优先走国内镜像，失败后回退到 Python 官方 embeddable package。
 - `HermesGo-debug.txt` 会被启动器和 supervisor 共享，只有最顶层启动会清空它。
 - 离线运行所需的 Ollama 模型已随包带入，不会在启动时自动下载。
+- 如果要发给别人，请直接压缩或复制整个目录；目标机只需要解压后双击 `HermesGo.bat`。
 '@
 
 $installerReadme = @'
@@ -1342,7 +1407,7 @@ $builderReadme = @'
 这个目录负责两件事：
 
 1. 记录如何把当前仓库里的 Hermes 做成 Windows 单目录包
-2. 用脚本生成仓库外的独立 `hermes-release/HermesGo`
+2. 用脚本生成仓库外的独立 `create_hermes_go/output/HermesGo`，它就是可直接拷贝的绿色包
 
 ## 当前路线
 
@@ -1351,6 +1416,7 @@ $builderReadme = @'
 - 官方 embeddable Python 取代原始 venv
 - 默认切到 Ollama 本地模型，避免 token
 - Ollama 运行时和包内模型仓都会被复制进独立 release 目录，只保留目录内自举能力；GPU 专用后端、安装器 ZIP 和前端源码不会进入发行包
+- `create_hermes_go/output/HermesGo` 是最终交付目录，复制整个目录即可离线运行
 
 ## 入口
 
@@ -1363,9 +1429,10 @@ $doc001 = @'
 
 ## 当前判断
 
-- 当前能跑起来的是官方 Hermes v0.9.0 代码和官方 Dashboard。
+- 当前能跑起来的是官方 Hermes v0.10.0 代码和官方 Dashboard。
 - `create_hermes_go` 的目标是把这条工作链固化成脚本，并生成新的独立目录。
 - 当前输出包的 Python 运行时来自官方 embeddable package，而不是本机系统 Python。
+- 当前输出包的交付目录就是 `create_hermes_go/output/HermesGo`，可以整目录复制到别的机器直接使用。
 
 ## 标准部分
 
@@ -1378,6 +1445,7 @@ $doc001 = @'
 - 便携 Python
 - Windows bat 启动链
 - Ollama 本地模型预配置
+- 绿色包交付目录
 '@
 
 $doc002 = @'
@@ -1390,12 +1458,14 @@ $doc002 = @'
 3. 复制官方 Hermes 源码
 4. 生成新的 `HermesGo.bat`、`Setup-Ollama.bat`、`Verify-HermesGo.bat`
 5. 生成默认的本地模型配置
+6. 把最终绿色包固定输出到 `create_hermes_go/output/HermesGo`
 
 ## 当前还能改进的地方
 
 1. 在干净 Win11 机器上继续做无缓存冷启动验证
 2. 进一步补齐 Git for Windows / MinGit 的便携检测
 3. 视需要增加 Python embeddable 的更多国内镜像候选
+4. 给绿色包增加一个目录白名单校验，防止升级后多出杂文件
 '@
 
 $setupOllamaBat = $setupOllamaBat.Replace("__DEFAULT_OLLAMA_MODEL__", $defaultOllamaModel)
@@ -1409,8 +1479,8 @@ Write-Utf8File -Path (Join-Path $OutputDir "Setup-Ollama.bat") -Content $setupOl
 Write-Utf8File -Path (Join-Path $OutputDir "Start-HermesGo.ps1") -Content $startHermesPs1
 Write-Utf8File -Path (Join-Path $OutputDir "Verify-HermesGo.bat") -Content $verifyBat
 Write-Utf8File -Path (Join-Path $OutputDir "Verify-HermesGo.ps1") -Content $verifyPs1
-Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\tools\Switch-HermesGoModel.ps1") -Destination (Join-Path $OutputDir "Switch-HermesGoModel.ps1") -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\tools\Switch-HermesGoModel.bat") -Destination (Join-Path $OutputDir "Switch-HermesGoModel.bat") -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\Switch-HermesGoModel.ps1") -Destination (Join-Path $OutputDir "Switch-HermesGoModel.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\Switch-HermesGoModel.bat") -Destination (Join-Path $OutputDir "Switch-HermesGoModel.bat") -Force
 Write-Utf8File -Path (Join-Path $OutputDir "README.md") -Content $packageReadme
 Write-Utf8File -Path (Join-Path $OutputDir "installers\README.md") -Content $installerReadme
 Reset-OutputHomeState -HomeDir (Join-Path $OutputDir "home")
@@ -1422,6 +1492,7 @@ DEFAULT_OLLAMA_BASE_URL=$defaultOllamaBaseUrl
 "@
 Write-Utf8File -Path (Join-Path $OutputDir "home\config.yaml") -Content $homeConfig
 Write-Utf8File -Path (Join-Path $OutputDir "home\.env") -Content ""
+Build-HermesGoExe -SourcePath (Join-Path $builderRoot "HermesGoBootstrap.cs") -OutputPath (Join-Path $OutputDir "HermesGo.exe")
 Write-Utf8File -Path (Join-Path $builderRoot "README.md") -Content $builderReadme
 Write-Utf8File -Path (Join-Path $docsDir "001-当前状态与标准边界.md") -Content $doc001
 Write-Utf8File -Path (Join-Path $docsDir "002-便携构建步骤与后续工作.md") -Content $doc002

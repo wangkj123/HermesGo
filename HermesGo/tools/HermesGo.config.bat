@@ -1,6 +1,0 @@
-@echo off
-rem Shared HermesGo configuration
-
-if not defined HERMESGO_DASHBOARD_HOST set "HERMESGO_DASHBOARD_HOST=127.0.0.1"
-if not defined HERMESGO_DASHBOARD_PORT set "HERMESGO_DASHBOARD_PORT=9119"
-if not defined HERMESGO_DASHBOARD_URL set "HERMESGO_DASHBOARD_URL=http://127.0.0.1:9119/"

@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $workflowRoot = $PSScriptRoot
 $repoRoot = Split-Path -Parent $workflowRoot
+$packageRoot = Join-Path $repoRoot "create_hermes_go\output\HermesGo"
 $runsRoot = Join-Path $workflowRoot "runs"
 $latestRunPath = Join-Path $workflowRoot "latest-run.txt"
 $latestSummaryPath = Join-Path $workflowRoot "latest-summary.txt"
@@ -193,7 +194,7 @@ $reviewReason = "All configured checks passed."
 
 if (-not $SkipVerification) {
     $scriptsToRun = @(
-        (Join-Path $repoRoot "HermesGo\Verify-HermesGo.ps1"),
+        (Join-Path $packageRoot "Verify-HermesGo.ps1"),
         (Join-Path $repoRoot "HermesGo\Verify-HermesGoSupervisor.ps1")
     )
 
