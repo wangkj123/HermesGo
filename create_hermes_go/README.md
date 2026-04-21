@@ -24,3 +24,9 @@
 
 - `Create-HermesGo.bat`
 - `Create-HermesGo.ps1`
+
+## 测试目录
+
+- `test/`：独立的绿色包测试工作区
+- `test/Prepare-HermesGoTestWorkspace.ps1`：把 `output/HermesGo` 复制到隔离工作区，方便反复迭代
+- `test/Verify-HermesGoTestWorkspace.ps1`：检查测试工作区是否仍然满足交付边界
