@@ -260,6 +260,27 @@ def get_last_tag():
     return None
 
 
+def get_repo_url():
+    """Derive the GitHub repository URL from the configured origin remote."""
+    remote = git("remote", "get-url", "origin")
+    if not remote:
+        return "https://github.com/NousResearch/hermes-agent"
+
+    remote = remote.strip()
+    if remote.endswith(".git"):
+        remote = remote[:-4]
+
+    ssh_match = re.match(r"git@github\.com:(.+)", remote)
+    if ssh_match:
+        return f"https://github.com/{ssh_match.group(1)}"
+
+    https_match = re.match(r"https://github\.com/(.+)", remote)
+    if https_match:
+        return remote
+
+    return remote
+
+
 def next_available_tag(base_tag: str) -> tuple[str, str]:
     """Return a tag/calver pair, suffixing same-day releases when needed."""
     if not git("tag", "--list", base_tag):
@@ -676,14 +697,17 @@ def main():
     print()
 
     # Generate changelog
+    repo_url = get_repo_url()
+
     changelog = generate_changelog(
         commits, tag_name, new_version,
         prev_tag=prev_tag,
         first_release=args.first_release,
+        repo_url=repo_url,
     )
 
     if args.output:
-        Path(args.output).write_text(changelog)
+        Path(args.output).write_text(changelog, encoding="utf-8")
         print(f"Changelog written to {args.output}")
     else:
         print(changelog)
@@ -741,7 +765,7 @@ def main():
 
         # Create GitHub release
         changelog_file = REPO_ROOT / ".release_notes.md"
-        changelog_file.write_text(changelog)
+        changelog_file.write_text(changelog, encoding="utf-8")
 
         gh_cmd = [
             "gh", "release", "create", tag_name,
