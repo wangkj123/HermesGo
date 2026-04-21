@@ -5,7 +5,7 @@
 ## 你应该先看什么
 
 - 如果你只是想直接用，先看 [HermesGo/README.md](HermesGo/README.md)
-- 如果你想下载现成版本，去 GitHub Releases 下载最新的 `HermesGo-2026.4.21-lite.zip`
+- 如果你想下载现成版本，直接下完整离线包：`HermesGo-2026.4.21.zip`
 - 如果你想重新打包，先看 [create_hermes_go/README.md](create_hermes_go/README.md)
 - 如果你想独立测试修改，先看 [create_hermes_go/test/README.md](create_hermes_go/test/README.md)
 
@@ -26,10 +26,12 @@
 
 - <https://github.com/wangkj123/HermesGo/releases/latest>
 
-当前可下载资产：
+直接下载完整离线包：
 
-- `HermesGo-2026.4.21-lite.zip`
-- `HermesGo-2026.4.21-lite.sha256.txt`
+- [HermesGo-2026.4.21.zip](https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.4.21.zip)
+- [HermesGo-2026.4.21.sha256.txt](https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.4.21.sha256.txt)
+
+这个完整包体积大约 1.6GB，包含 HermesGo 直接运行所需的运行时、Dashboard 和内置 Ollama 模型仓。
 
 ## 这个仓库怎么工作
 
