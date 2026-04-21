@@ -71,6 +71,5 @@
 - 每次切换下载源时，要在进度日志中记录所用来源、结果和是否进入代理回退。
 ## 10. repository scope
 - This repository is the HermesGo green-package delivery and build workspace.
-- Do not introduce "prompt recovery" or "one month Codex + Cursor recovery workspace" wording into the repo's main documentation unless the user explicitly asks for that separate project.
 - Main documentation should describe HermesGo source, packaging, release assets, and test workspace usage.
 - If a task refers to a different project or workspace, treat it as separate and keep its docs isolated from HermesGo delivery docs.

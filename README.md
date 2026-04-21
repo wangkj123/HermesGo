@@ -1,6 +1,6 @@
 # HermesGo 绿色版交付仓库
 
-这个仓库不是“提示词恢复工作区”。它的目标是把 Hermes Agent 做成可下载、可直接运行、可独立测试和可重复发布的 Windows 绿色版。
+这个仓库的目标是把 Hermes Agent 做成可下载、可直接运行、可独立测试和可重复发布的 Windows 绿色版。
 
 ## 你应该先看什么
 
@@ -52,5 +52,4 @@ powershell -ExecutionPolicy Bypass -File .\create_hermes_go\test\Verify-HermesGo
 ## 说明
 
 - 这个仓库里所有“直接下载就能用”的说明，都应该面向 HermesGo 绿色版。
-- 任何与“提示词恢复工作区”有关的内容，如果没有明确业务需求，都不应该放在这个仓库的主说明里。
 - 如果你要改的是打包、启动、验证或发布流程，优先看 `HermesGo/` 和 `create_hermes_go/`。
