@@ -27,6 +27,36 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 
 ---
 
+## HermesGo 使用说明
+
+这是这个仓库的绿色包入口。你拿到 `HermesGo/` 目录后，按下面顺序用：
+
+1. 把整个 `HermesGo/` 目录原样复制到目标机器，不要只拷贝 `HermesGo.exe`。
+2. 双击 `HermesGo.bat`。它会调用 `Start-HermesGo.ps1` 启动内置运行时、Dashboard 和聊天窗口。
+3. 如果你想直接看启动参数，可以运行 `Start-HermesGo.ps1`，常用开关是 `-NoOpenBrowser` 和 `-NoOpenChat`。
+4. 想切换默认本地模型时，运行 `Switch-HermesGoModel.bat` 或 `Switch-HermesGoModel.ps1`。
+5. 想先做一次自检，运行 `Verify-HermesGo.bat`。它会检查关键文件、运行时目录和本地状态是否完整。
+6. 启动失败时，先看根目录的 `HermesGo-debug.txt`，再看 `logs/tmp/` 里的临时日志。
+
+这个包的目录职责很明确：
+
+- `runtime/`：内置 Python、Hermes 运行时和 Dashboard。
+- `home/`：用户状态、配置、会话和持久化数据。
+- `data/ollama/models/`：离线可用的本地模型缓存。
+- `installers/`：可选安装器，不是启动必需项。
+- `HermesGo-debug.txt`：每次启动都会刷新，适合排障。
+
+## 独立测试与迭代
+
+如果你想改包内容、反复验证，不要直接在正式 `HermesGo/` 里改。先用测试工作区：
+
+1. 运行 `create_hermes_go/test/Prepare-HermesGoTestWorkspace.ps1 -Clean`。
+2. 它会把 `create_hermes_go/output/HermesGo` 复制到 `create_hermes_go/test/workspaces/HermesGo-sandbox`。
+3. 在这个沙箱里改文件、跑验证、反复迭代。
+4. 运行 `create_hermes_go/test/Verify-HermesGoTestWorkspace.ps1`，确认你改完后仍然保留交付边界。
+
+我这次已经替你跑过一次测试工作区校验，结果是通过的。
+
 ## Quick Install
 
 ```bash
