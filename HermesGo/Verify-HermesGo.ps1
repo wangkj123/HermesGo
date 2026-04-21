@@ -9,6 +9,7 @@ $dashboardErrLog = Join-Path $tmpLogDir "HermesGo-dashboard-verify.err.txt"
 $dashboardUrl = "http://127.0.0.1:9119/"
 $configPath = Join-Path $root "home\config.yaml"
 $ollamaModelsDir = Join-Path $root "data\ollama\models"
+$iconPath = Join-Path $root "HermesGo.ico"
 $proxyBypassDefaults = @(
     "localhost",
     "127.0.0.1",
@@ -167,6 +168,9 @@ function Invoke-OllamaCompatProbe {
 
 New-Item -ItemType Directory -Path $tmpLogDir -Force | Out-Null
 Remove-Item -LiteralPath $launcherLog, $dashboardOutLog, $dashboardErrLog -Force -ErrorAction SilentlyContinue
+if (-not (Test-Path -LiteralPath $iconPath)) {
+    throw "Missing expected file: $iconPath"
+}
 $oldPythonHome = $env:PYTHONHOME
 $oldPythonPath = $env:PYTHONPATH
 $oldHeadless = $env:HERMESGO_HEADLESS

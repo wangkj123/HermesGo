@@ -433,6 +433,43 @@ function Start-ChatWindow {
     Write-LauncherLine "Chat window launched: PID $($process.Id)"
 }
 
+function Open-DashboardBrowser {
+    param([string]$Url)
+
+    $attempts = @(
+        @{
+            Name = "Start-Process url"
+            Action = {
+                Start-Process -FilePath $Url
+            }
+        }
+        @{
+            Name = "cmd start"
+            Action = {
+                Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "start", "", $Url -WindowStyle Hidden
+            }
+        }
+        @{
+            Name = "explorer"
+            Action = {
+                Start-Process -FilePath "explorer.exe" -ArgumentList $Url
+            }
+        }
+    )
+
+    foreach ($attempt in $attempts) {
+        try {
+            & $attempt.Action
+            Write-LauncherLine "Browser launched: $Url via $($attempt.Name)"
+            return
+        } catch {
+            Write-LauncherLine "Browser launch failed via $($attempt.Name): $($_.Exception.Message)"
+        }
+    }
+
+    throw "Unable to launch browser for $Url"
+}
+
 try {
     New-Item -ItemType Directory -Path $tmpLogDir -Force | Out-Null
     if (-not $preserveDebugLog) {
@@ -471,8 +508,7 @@ try {
 
     if (-not $headless) {
         if (-not $NoOpenBrowser) {
-            Start-Process $dashboardUrl
-            Write-LauncherLine "Browser launched: $dashboardUrl"
+            Open-DashboardBrowser -Url $dashboardUrl
         }
         if (-not $NoOpenChat) {
             Start-ChatWindow

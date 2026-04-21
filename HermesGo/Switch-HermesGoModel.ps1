@@ -85,14 +85,14 @@ $current = Read-PortableDefaults -Path $defaultsPath
 if ([string]::IsNullOrWhiteSpace($Model)) {
     $fallback = [string]$current.DEFAULT_OLLAMA_MODEL
     if ($Host.Name -eq "ConsoleHost" -and [Environment]::UserInteractive) {
-        $entered = Read-Host ("输入要切换的本地模型 [{0}]" -f $fallback)
+        $entered = Read-Host ("Enter the local model to switch to [{0}]" -f $fallback)
         if ([string]::IsNullOrWhiteSpace($entered)) {
             $Model = $fallback
         } else {
             $Model = $entered.Trim()
         }
     } else {
-        Write-Host "请用 -Model 指定要切换的本地模型，例如: Switch-HermesGoModel.ps1 -Model qwen2.5:7b"
+        Write-Host "Use -Model to specify the local model, for example: Switch-HermesGoModel.ps1 -Model qwen2.5:7b"
         exit 1
     }
 }
@@ -143,6 +143,6 @@ $configText = Update-YamlValue -Text $configText -Key "provider" -Value $Provide
 $configText = Update-YamlValue -Text $configText -Key "base_url" -Value $BaseUrl
 Set-Content -LiteralPath $configPath -Value $configText -Encoding utf8
 
-Write-Host ("已切换默认本地模型: {0}" -f $Model)
-Write-Host ("已更新: {0}" -f $defaultsPath)
-Write-Host ("已更新: {0}" -f $configPath)
+Write-Host ("Default local model switched to: {0}" -f $Model)
+Write-Host ("Updated: {0}" -f $defaultsPath)
+Write-Host ("Updated: {0}" -f $configPath)
