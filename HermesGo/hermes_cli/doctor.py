@@ -392,9 +392,9 @@ def run_doctor(args):
         check_warn("Auth provider status", f"(could not check: {e})")
 
     if shutil.which("codex"):
-        check_ok("codex CLI")
+        check_ok("codex CLI / bundled shim")
     else:
-        check_warn("codex CLI not found", "(required for openai-codex login)")
+        check_warn("codex CLI not found", "(HermesGo bundles a codex.cmd compatibility launcher in the release package)")
 
     # =========================================================================
     # Check: Directory structure

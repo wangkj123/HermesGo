@@ -26,6 +26,7 @@ function Resolve-PortablePath {
 $root = Resolve-PortablePath -Path $PSScriptRoot
 $pythonExe = Join-Path $root "runtime\python311\python.exe"
 $runtimeDir = Join-Path $root "runtime\hermes-agent"
+$runtimeBinDir = Join-Path $root "runtime\bin"
 $homeDir = Join-Path $root "home"
 $ollamaModelsDir = Join-Path $root "data\ollama\models"
 $tmpLogDir = Join-Path $root "logs\tmp"
@@ -33,6 +34,7 @@ $debugLog = Join-Path $root "HermesGo-debug.txt"
 $dashboardOutLog = Join-Path $tmpLogDir "HermesGo-dashboard.out.txt"
 $dashboardErrLog = Join-Path $tmpLogDir "HermesGo-dashboard.err.txt"
 $dashboardUrl = "http://127.0.0.1:9119/"
+$dashboardBrowserUrl = "http://127.0.0.1:9119/config"
 $headless = $env:HERMESGO_HEADLESS -eq "1"
 $preserveDebugLog = $env:HERMESGO_APPEND_DEBUG_LOG -eq "1"
 $proxyBypassDefaults = @(
@@ -419,6 +421,7 @@ function Start-ChatWindow {
 
     $command = 'set PYTHONHOME=' +
         '&&set PYTHONPATH=' +
+        '&&set PATH=' + $root + ';' + $runtimeBinDir + ';%PATH%' +
         '&&set HERMES_HOME=' + $homeDir +
         '&&set OLLAMA_MODELS=' + $ollamaModelsDir +
         '&&set NO_PROXY=' + $env:NO_PROXY +
@@ -485,6 +488,7 @@ try {
     Write-LauncherLine "Home dir: $homeDir"
     Write-LauncherLine "Ollama model store: $ollamaModelsDir"
     Write-LauncherLine "Dashboard URL: $dashboardUrl"
+    Write-LauncherLine "Dashboard browser URL: $dashboardBrowserUrl"
     Write-LauncherLine "Dashboard temp stdout: $dashboardOutLog"
     Write-LauncherLine "Dashboard temp stderr: $dashboardErrLog"
 
@@ -497,6 +501,7 @@ try {
     Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
     Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
     Apply-ProxyBypassEnvironment
+    $env:PATH = [string]::Join(';', @($root, $runtimeBinDir, $env:PATH))
     $env:HERMES_HOME = $homeDir
     $env:OLLAMA_MODELS = $ollamaModelsDir
     $env:PYTHONUTF8 = "1"
@@ -508,7 +513,7 @@ try {
 
     if (-not $headless) {
         if (-not $NoOpenBrowser) {
-            Open-DashboardBrowser -Url $dashboardUrl
+            Open-DashboardBrowser -Url $dashboardBrowserUrl
         }
         if (-not $NoOpenChat) {
             Start-ChatWindow

@@ -1309,7 +1309,7 @@ def _resolve_codex_cli_executable() -> str:
     if executable:
         return executable
     raise AuthError(
-        "codex CLI not found. Install codex to use OpenAI browser login in HermesGo.",
+        "codex compatibility launcher not found in PATH. HermesGo bundles codex.cmd in the release package.",
         provider="openai-codex",
         code="codex_cli_missing",
         relogin_required=True,

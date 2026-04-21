@@ -2,6 +2,7 @@
 
 $root = $PSScriptRoot
 $pythonExe = Join-Path $root "runtime\python311\python.exe"
+$runtimeBinDir = Join-Path $root "runtime\bin"
 $launcherLog = Join-Path $root "HermesGo-debug.txt"
 $tmpLogDir = Join-Path $root "logs\tmp"
 $dashboardOutLog = Join-Path $tmpLogDir "HermesGo-dashboard-verify.out.txt"
@@ -10,6 +11,7 @@ $dashboardUrl = "http://127.0.0.1:9119/"
 $configPath = Join-Path $root "home\config.yaml"
 $ollamaModelsDir = Join-Path $root "data\ollama\models"
 $iconPath = Join-Path $root "HermesGo.ico"
+$codexCmd = Join-Path $root "codex.cmd"
 $proxyBypassDefaults = @(
     "localhost",
     "127.0.0.1",
@@ -32,6 +34,8 @@ $proxyBypassDefaults = @(
     ".sdu.edu.cn",
     ".ustc.edu.cn"
 )
+
+$env:PATH = [string]::Join(';', @($root, $runtimeBinDir, $env:PATH))
 
 function Assert-Contains {
     param([string]$Path, [string]$Needle)
@@ -207,10 +211,24 @@ try {
         throw "sys.path still contains the source venv site-packages."
     }
 
+    $codexResolved = Get-Command codex -ErrorAction SilentlyContinue
+    if (-not $codexResolved) {
+        throw "codex compatibility launcher not found in PATH."
+    }
+    $codexOutput = & cmd /c "call `"$codexCmd`"" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "codex compatibility launcher failed with exit code $LASTEXITCODE"
+    }
+    $codexText = ($codexOutput -join "`n")
+    if ($codexText -notmatch "HermesGo codex compatibility launcher") {
+        throw "codex compatibility launcher did not print the expected banner."
+    }
+
     cmd /c "call `"$root\HermesGo.bat`" -NoOpenBrowser -NoOpenChat"
     if ($LASTEXITCODE -ne 0) { throw "HermesGo.bat failed with exit code $LASTEXITCODE" }
     Assert-Contains $launcherLog "HermesGo finished with exit code 0."
     Assert-Contains $launcherLog "Ollama model store: $ollamaModelsDir"
+    Assert-Contains $launcherLog "Dashboard browser URL: http://127.0.0.1:9119/config"
     $response = Invoke-DirectHttpRequest -Uri $dashboardUrl -TimeoutSec 5
     if ($response.StatusCode -ne 200 -or $response.Content -notmatch "<title>Hermes Agent</title>") {
         throw "Dashboard probe did not return the Hermes UI."

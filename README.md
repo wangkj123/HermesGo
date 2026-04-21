@@ -25,4 +25,4 @@ Do not edit the release directory directly. Use the isolated test workspace inst
 
 ## Release behavior
 
-The shipped `HermesGo` package is intended to run without installing a separate Python runtime or Ollama bundle. The main launcher opens the Dashboard in a browser and starts the chat window. The packaged `HermesGo.exe` has a custom horse-head icon. The downloadable zip keeps the top-level `HermesGo/` folder intact so the package can be extracted directly.
+The shipped `HermesGo` package is intended to run without installing a separate Python runtime or Ollama bundle. The main launcher opens the Dashboard `Config` page in a browser and starts the chat window. The packaged `HermesGo.exe` has a custom horse-head icon. The package also includes a bundled `codex.cmd` compatibility launcher so OpenAI Codex login stays inside the green bundle. The downloadable zip keeps the top-level `HermesGo/` folder intact so the package can be extracted directly.
