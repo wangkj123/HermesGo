@@ -1,48 +1,56 @@
-# 一个月提示词恢复工作区（Codex + Cursor）
+# HermesGo 绿色版交付仓库
 
-**目的**：恢复最近约一个月的 Codex 与 Cursor 提示词/对话，组成独立工作区，**目标为恢复简历相关内容**。  
-与当前工程 `codex_prompt_recovery`（仅一周、仅 Codex）并列，本目录为「一个月 + 双源」恢复区。
+这个仓库不是“提示词恢复工作区”。它的目标是把 Hermes Agent 做成可下载、可直接运行、可独立测试和可重复发布的 Windows 绿色版。
 
-## 目录名与范围
+## 你应该先看什么
 
-| 项目 | 说明 |
-|------|------|
-| **时间范围** | 2026-01-20 ～ 2026-02-19（约一个月） |
-| **数据源** | Codex 会话（.codex/sessions/2026/01、02）+ Cursor 聊天（AppData/Cursor User/workspaceStorage、globalStorage） |
-| **恢复目标** | 简历（及与本工程、创意相关的提示词） |
+- 如果你只是想直接用，先看 [HermesGo/README.md](HermesGo/README.md)
+- 如果你想下载现成版本，去 GitHub Releases 下载最新的 `HermesGo-2026.4.21-lite.zip`
+- 如果你想重新打包，先看 [create_hermes_go/README.md](create_hermes_go/README.md)
+- 如果你想独立测试修改，先看 [create_hermes_go/test/README.md](create_hermes_go/test/README.md)
 
-## 规则与配置（完整工作区）
+## 仓库结构
 
-以下文件自 creative 根目录**原样复制**，打开本目录为工作区时 Cursor/Codex 会按项目根加载，与主工程行为一致：
+| 路径 | 作用 |
+|---|---|
+| `HermesGo/` | 绿色版交付目录的说明和使用指南 |
+| `create_hermes_go/` | 绿色版构建流程、输出目录和测试工作区 |
+| `create_hermes_go/output/HermesGo/` | 最终交付包的本地输出 |
+| `create_hermes_go/test/` | 独立测试工作区，用来反复迭代 |
+| `docs/` | 项目文档 |
+| `tests/` | 测试代码和验证脚本 |
 
-- **`.cursorrules`**：Cursor/Codex 共用规则
-- **`.codexrc`**：Codex 指向 .cursorrules
-- **`.codex-system-prompt`**：Codex 系统提示词
-- **`AGENTS.md`**：规则入口说明
+## 发布版
 
-## 目录结构
+最新发布页：
 
-| 路径 | 内容 |
-|------|------|
-| `codex/raw_sessions/` | Codex 一个月内原始 jsonl 会话备份 |
-| `codex/index_one_month.md` | Codex 会话清单与时间线索引 |
-| `cursor/raw_db/` | Cursor state.vscdb 拷贝（只读备份） |
-| `cursor/extracted/` | 从 state.vscdb 提取的聊天/提示词文本（可搜简历） |
-| `timeline_merged/` | Codex + Cursor 合并时间线，标注来源与简历相关 |
-| `docs/` | 恢复说明、与当前工程对比、简历相关发现 |
-| `goal_resume.md` | 恢复目标：简历（记录检索结果与待补项） |
+- <https://github.com/wangkj123/HermesGo/releases/latest>
 
-## 与当前工程对比
+当前可下载资产：
 
-| 对比项 | 当前工程 codex_prompt_recovery | 本工作区 prompt_recovery_one_month |
-|--------|-------------------------------|-------------------------------------|
-| 时间 | 一周（2026-02-12～19） | 约一个月（2026-01-20～02-19） |
-| 来源 | 仅 Codex | Codex + Cursor |
-| 目标 | 投影/创意恢复 | **简历** + 提示词恢复 |
-| 位置 | creative/codex_prompt_recovery | creative/prompt_recovery_one_month |
+- `HermesGo-2026.4.21-lite.zip`
+- `HermesGo-2026.4.21-lite.sha256.txt`
 
-## 使用方式
+## 这个仓库怎么工作
 
-1. **单独工作区**：可用 Cursor/VSCode 直接「打开文件夹」到本目录 `prompt_recovery_one_month`，作为独立工作区使用。
-2. **搜简历**：在 `cursor/extracted/resume_hits.txt`、`docs/简历相关-筛出.md`、`goal_resume.md` 中查看。
-3. **只读**：本目录以恢复与比对为主，不删除、不覆盖原始备份。
+1. 开发和修复先在仓库里完成。
+2. 绿色版产物在 `create_hermes_go/output/HermesGo/`。
+3. 测试修改先复制到 `create_hermes_go/test/workspaces/HermesGo-sandbox/`。
+4. 验证通过后，再把产物打包上传到 GitHub Releases。
+
+## 独立测试流程
+
+我已经跑通过以下流程：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\create_hermes_go\test\Prepare-HermesGoTestWorkspace.ps1 -Clean
+powershell -ExecutionPolicy Bypass -File .\create_hermes_go\test\Verify-HermesGoTestWorkspace.ps1
+```
+
+结果是通过的。这个流程的目的，是让你在单独沙箱里改动和验证，不污染正式交付目录。
+
+## 说明
+
+- 这个仓库里所有“直接下载就能用”的说明，都应该面向 HermesGo 绿色版。
+- 任何与“提示词恢复工作区”有关的内容，如果没有明确业务需求，都不应该放在这个仓库的主说明里。
+- 如果你要改的是打包、启动、验证或发布流程，优先看 `HermesGo/` 和 `create_hermes_go/`。

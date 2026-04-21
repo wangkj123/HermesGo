@@ -69,3 +69,8 @@
 - 默认先尝试不经过 Clash 或其他代理的直连路径；只有直连和国内镜像都失败时，才允许把代理作为最后回退。
 - 对于 Python 依赖优先使用 `TUNA`、阿里云等 PyPI 镜像；对 npm 依赖优先使用 `npmmirror`；对源码归档、安装包和仓库快照优先寻找国内镜像或国内托管副本。
 - 每次切换下载源时，要在进度日志中记录所用来源、结果和是否进入代理回退。
+## 10. repository scope
+- This repository is the HermesGo green-package delivery and build workspace.
+- Do not introduce "prompt recovery" or "one month Codex + Cursor recovery workspace" wording into the repo's main documentation unless the user explicitly asks for that separate project.
+- Main documentation should describe HermesGo source, packaging, release assets, and test workspace usage.
+- If a task refers to a different project or workspace, treat it as separate and keep its docs isolated from HermesGo delivery docs.
