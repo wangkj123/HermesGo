@@ -5,8 +5,8 @@ This repository packages Hermes Agent into a Windows green bundle called HermesG
 ## What users should download
 
 - Latest release page: <https://github.com/wangkj123/HermesGo/releases/latest>
-- Full offline package: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1531.zip>
-- SHA256 checksum: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1531.sha256.txt>
+- Full offline package: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1852.zip>
+- SHA256 checksum: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1852.sha256.txt>
 
 ## What this repo contains
 
@@ -25,4 +25,8 @@ Do not edit the release directory directly. Use the isolated test workspace inst
 
 ## Release behavior
 
-The shipped `HermesGo` package is intended to run without installing a separate Python runtime or Ollama bundle. The main launcher opens the Dashboard `Config` page in a browser and starts the chat window. The packaged `HermesGo.exe` has a custom horse-head icon. The package also includes a bundled `codex.cmd` compatibility launcher so OpenAI Codex login stays inside the green bundle. The downloadable zip keeps the top-level `HermesGo/` folder intact so the package can be extracted directly.
+The shipped `HermesGo` package is a green / USB-friendly / one-click install bundle with a built-in local model runtime. It is intended to run without installing a separate Python runtime or Ollama bundle. `HermesGo.exe` opens a classic launcher for beginners, now with a selectable action box for one-click start, GPT-5.4 mini, Dashboard, and utility actions, while the Dashboard remains available for advanced users. The launcher remembers your last selected item, keeps that item at the top on the next start, and can load custom actions from `home/launcher-actions.txt`. The packaged `HermesGo.exe` has a custom horse-head icon.
+
+For OpenAI Codex, this release does not rely on an external Codex CLI installation. Local 2B startup never triggers ChatGPT / Codex sign-in. Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing.
+
+The downloadable zip keeps the top-level `HermesGo/` folder intact so the package can be extracted directly. Older release versions stay published on GitHub Releases and are not deleted when a new release is added.

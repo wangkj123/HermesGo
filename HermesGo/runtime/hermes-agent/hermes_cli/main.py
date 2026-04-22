@@ -5163,6 +5163,7 @@ For more help on a command:
     auth_add.add_argument("--inference-url", help="Nous inference base URL")
     auth_add.add_argument("--client-id", help="OAuth client id")
     auth_add.add_argument("--scope", help="OAuth scope override")
+    auth_add.add_argument("--device-auth", action="store_true", help="Force the Codex device-auth login flow")
     auth_add.add_argument("--no-browser", action="store_true", help="Do not auto-open a browser for OAuth login")
     auth_add.add_argument("--timeout", type=float, help="OAuth/network timeout in seconds")
     auth_add.add_argument("--insecure", action="store_true", help="Disable TLS verification for OAuth login")

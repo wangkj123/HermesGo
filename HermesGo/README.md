@@ -1,12 +1,12 @@
 # HermesGo
 
-HermesGo is the Windows green bundle for Hermes Agent.
+HermesGo is the Windows green bundle for Hermes Agent. It is also intended to serve as a USB-friendly, one-click install package with a built-in local model runtime.
 
 ## Download
 
 - Latest release page: <https://github.com/wangkj123/HermesGo/releases/latest>
-- Full offline package: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1531.zip>
-- Checksum file: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1531.sha256.txt>
+- The downloadable zip and checksum are published on the release page above.
+- Older release versions remain published on GitHub Releases and are not deleted.
 
 The full package is about 1.6 GB and includes everything needed to run directly:
 
@@ -15,34 +15,37 @@ The full package is about 1.6 GB and includes everything needed to run directly:
 - Portable Python
 - Portable Ollama runtime
 - Default Ollama 2B model store
-- `HermesGo.exe` with a horse-head icon
-- Bundled `codex.cmd` compatibility launcher
+- `HermesGo.exe` with a horse-head icon, a classic beginner launcher, and a selectable action box for fast switching
+- Bundled `codex.cmd` compatibility launcher for the release package, not an external Codex CLI dependency
+- `tutorial/` with numbered screenshots and usage notes for new users
 
 ## How to use
 
 1. Download the full zip. It keeps the top-level `HermesGo/` directory.
 2. Extract the whole `HermesGo/` directory. Do not copy only `HermesGo.exe`.
-3. Double-click `HermesGo.exe`. It opens the Dashboard `Config` page in your browser and starts the `HermesGo Chat` window.
-4. If you prefer the batch entry, double-click `HermesGo.bat`.
+3. Double-click `HermesGo.exe`. It opens the classic launcher with a selectable action box for beginner start, OpenAI GPT-5.4 mini, Dashboard / Config, and utility actions for model switching, self-check, logs, config folders, and custom launcher actions from `home/launcher-actions.txt`.
+4. If you prefer the direct entry, double-click `HermesGo.bat`.
 5. For a quick self-check, run `Verify-HermesGo.bat`.
 6. To switch the default local model, run `Switch-HermesGoModel.bat`.
-7. To configure Codex / account login, use the Dashboard `Config` page or run `codex.cmd login`.
+7. Local 2B startup does not trigger ChatGPT / Codex sign-in. Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing.
+8. If you are learning the package, open `tutorial/README.md` first and follow the numbered screenshots.
 
 ## Directory map
 
 | Path | Purpose |
 |---|---|
-| `HermesGo.exe` | Main green-bundle entrypoint with the custom icon |
-| `HermesGo.bat` | Batch entrypoint for double-click launch |
+| `HermesGo.exe` | Classic launcher entrypoint with beginner, cloud, advanced, utility, and custom choices |
+| `HermesGo.bat` | Direct entrypoint for the full runtime |
 | `Start-HermesGo.ps1` | Main launcher that starts runtime, Dashboard, and chat |
 | `Verify-HermesGo.bat` / `Verify-HermesGo.ps1` | Structure and runtime verification |
 | `Switch-HermesGoModel.bat` / `Switch-HermesGoModel.ps1` | Switch the default local model |
-| `codex.cmd` | Codex-compatible shim that routes into Hermes login flow |
+| `codex.cmd` | Bundled Codex-compatible shim used by the release package |
 | `runtime/` | Packaged runtime files |
 | `home/` | Persistent config, sessions, state, and memory |
 | `data/` | Runtime data |
 | `data/ollama/` | Bundled Ollama model store |
 | `data/ollama/models/` | Offline model files and manifests |
+| `tutorial/` | Numbered usage screenshots and notes for new users |
 | `logs/` | Temporary logs |
 | `HermesGo-debug.txt` | Root debug log, refreshed on each launch |
 | `installers/` | Optional installer drop-in directory, not required for runtime |
@@ -58,9 +61,12 @@ I did not keep editing the published output directly. I used an isolated test wo
 
 What the verification checks:
 
-- `HermesGo.bat` / `Start-HermesGo.ps1` still start the Dashboard
+- The launcher remembers the last selected item, loads custom actions from `home/launcher-actions.txt`, and covers both the selectable action box and the legacy button cards for local start, GPT-5.4 mini, and Dashboard
+- Cloud / GPT-5.4 mini checks Codex login state before launch and opens the browser login page only when credentials are missing
+- `HermesGo.bat` / `Start-HermesGo.ps1` still start the Dashboard flow
 - The bundled Ollama 2B model store is available
 - The portable Python runtime is still the bundled one
 - Launch logs are written to `HermesGo-debug.txt`
+- Release packaging excludes local `auth.json` / `auth.lock` credentials from the ship-ready bundle
 
 If you want to keep iterating, do it in the sandbox first and only return to the published package after the sandbox passes.

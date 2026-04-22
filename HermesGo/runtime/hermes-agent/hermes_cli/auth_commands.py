@@ -235,6 +235,7 @@ def auth_add_command(args) -> None:
     if provider == "openai-codex":
         creds = auth_mod._codex_cli_browser_login(
             open_browser=not getattr(args, "no_browser", False),
+            force_fresh_login=bool(getattr(args, "device_auth", False)),
         )
         label = (getattr(args, "label", None) or "").strip() or label_from_token(
             creds["tokens"]["access_token"],

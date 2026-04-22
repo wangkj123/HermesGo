@@ -1110,6 +1110,12 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
             logger.debug("Qwen OAuth token seed failed: %s", exc)
 
     elif provider == "openai-codex":
+        try:
+            from hermes_cli.auth import is_source_suppressed
+            if is_source_suppressed(provider, "device_code"):
+                return changed, active_sources
+        except ImportError:
+            pass
         state = _load_provider_state(auth_store, "openai-codex")
         tokens = state.get("tokens") if isinstance(state, dict) else None
         if isinstance(tokens, dict) and tokens.get("access_token"):

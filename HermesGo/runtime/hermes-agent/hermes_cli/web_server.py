@@ -1609,7 +1609,7 @@ def _codex_browser_login_worker(session_id: str, switch_account: bool = False) -
         else:
             _clear_local_codex_auth_files()
 
-        _codex_cli_browser_login(open_browser=True)
+        _codex_cli_browser_login(open_browser=True, force_fresh_login=switch_account)
         with _oauth_sessions_lock:
             sess = _oauth_sessions.get(session_id)
             if sess:

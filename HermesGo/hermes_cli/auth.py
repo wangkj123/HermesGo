@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ctypes
 import shutil
 import shlex
 import stat
@@ -41,6 +42,56 @@ from hermes_cli.config import get_hermes_home, get_config_path, read_raw_config
 from hermes_constants import OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
+
+if os.name == "nt":
+    from ctypes import wintypes
+
+    _USER32 = ctypes.windll.user32
+    _SW_RESTORE = 9
+    _ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+
+def _bring_browser_window_to_front(search_terms: tuple[str, ...] = ("OpenAI", "ChatGPT", "HermesGo", "Dashboard", "Config"), timeout_seconds: float = 3.0) -> bool:
+    if os.name != "nt":
+        return False
+
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        found = []
+
+        @_ENUM_WINDOWS_PROC
+        def _enum(hwnd, _lparam):
+            try:
+                length = _USER32.GetWindowTextLengthW(hwnd)
+                if length <= 0:
+                    return True
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                _USER32.GetWindowTextW(hwnd, buffer, length + 1)
+                title = buffer.value.strip()
+                if title:
+                    found.append((hwnd, title))
+            except Exception:
+                pass
+            return True
+
+        try:
+            _USER32.EnumWindows(_enum, 0)
+        except Exception:
+            return False
+
+        for hwnd, title in found:
+            lowered = title.lower()
+            if any(term.lower() in lowered for term in search_terms):
+                try:
+                    _USER32.ShowWindow(hwnd, _SW_RESTORE)
+                    _USER32.SetForegroundWindow(hwnd)
+                    return True
+                except Exception:
+                    pass
+
+        time.sleep(0.2)
+
+    return False
 
 try:
     import fcntl
@@ -2907,7 +2958,7 @@ def _login_openai_codex(args, pconfig: ProviderConfig) -> None:
     print(f"  Config updated: {config_path} (model.provider=openai-codex)")
 
 
-def _codex_device_code_login() -> Dict[str, Any]:
+def _codex_device_code_login(*, open_browser: bool = True) -> Dict[str, Any]:
     """Run the OpenAI device code login flow and return credentials dict."""
     import time as _time
 
@@ -2951,6 +3002,13 @@ def _codex_device_code_login() -> Dict[str, Any]:
     print(f"     \033[94m{issuer}/codex/device\033[0m\n")
     print("  2. Enter this code:")
     print(f"     \033[94m{user_code}\033[0m\n")
+    if open_browser:
+        opened = webbrowser.open(f"{issuer}/codex/device")
+        if opened:
+            print("  (Opened browser for verification)")
+        else:
+            print("  Could not open browser automatically — use the URL above.")
+        _bring_browser_window_to_front()
     print("Waiting for sign-in... (press Ctrl+C to cancel)")
 
     # Step 3: Poll for authorization code

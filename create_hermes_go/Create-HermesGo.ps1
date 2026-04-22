@@ -112,7 +112,8 @@ function Write-Utf8File {
     )
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
-    Set-Content -LiteralPath $Path -Value $Content -Encoding utf8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
 }
 
 function Stop-ProcessesUnderPath {
@@ -353,12 +354,19 @@ function Get-FrameworkCscPath {
 }
 
 function New-HermesGoIcon {
-    param([string]$OutputPath)
+    param(
+        [string]$OutputPath,
+        [string]$PngOutputPath
+    )
 
     Add-Type -AssemblyName System.Drawing
 
     $size = 256
-    $pngPath = [System.IO.Path]::ChangeExtension($OutputPath, ".png")
+    if ([string]::IsNullOrWhiteSpace($PngOutputPath)) {
+        $pngPath = [System.IO.Path]::ChangeExtension($OutputPath, ".png")
+    } else {
+        $pngPath = $PngOutputPath
+    }
     $bitmap = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
@@ -487,7 +495,7 @@ function New-HermesGoIcon {
             $stream.Dispose()
         }
     } finally {
-        if (Test-Path -LiteralPath $pngPath) {
+        if (-not $PngOutputPath -and (Test-Path -LiteralPath $pngPath)) {
             Remove-Item -LiteralPath $pngPath -Force -ErrorAction SilentlyContinue
         }
     }
@@ -510,7 +518,10 @@ function Build-HermesGoExe {
         (Join-Path $frameworkDir "System.Core.dll"),
         (Join-Path $frameworkDir "System.Net.Http.dll"),
         (Join-Path $frameworkDir "System.IO.Compression.dll"),
-        (Join-Path $frameworkDir "System.IO.Compression.FileSystem.dll")
+        (Join-Path $frameworkDir "System.IO.Compression.FileSystem.dll"),
+        (Join-Path $frameworkDir "System.Web.Extensions.dll"),
+        (Join-Path $frameworkDir "System.Drawing.dll"),
+        (Join-Path $frameworkDir "System.Windows.Forms.dll")
     )
 
     foreach ($referencePath in $referencePaths) {
@@ -724,6 +735,7 @@ $startHermesPs1 = @'
 param(
     [switch]$NoOpenBrowser,
     [switch]$NoOpenChat,
+    [string]$OAuthProvider = "",
     [int]$DashboardTimeoutSec = 45
 )
 
@@ -756,7 +768,7 @@ $debugLog = Join-Path $root "HermesGo-debug.txt"
 $dashboardOutLog = Join-Path $tmpLogDir "HermesGo-dashboard.out.txt"
 $dashboardErrLog = Join-Path $tmpLogDir "HermesGo-dashboard.err.txt"
 $dashboardUrl = "http://127.0.0.1:9119/"
-$dashboardBrowserUrl = "http://127.0.0.1:9119/config"
+$dashboardBrowserUrl = "http://127.0.0.1:9119/env?oauth=openai-codex"
 $headless = $env:HERMESGO_HEADLESS -eq "1"
 $preserveDebugLog = $env:HERMESGO_APPEND_DEBUG_LOG -eq "1"
 $proxyBypassDefaults = @(
@@ -1088,7 +1100,9 @@ function Test-DashboardReady {
 }
 
 function Start-DashboardProcess {
-    if (Test-DashboardReady) {
+    param([string]$OAuthProvider = "")
+
+    if (Test-DashboardReady -and [string]::IsNullOrWhiteSpace($OAuthProvider)) {
         Write-LauncherLine "Dashboard already reachable: $dashboardUrl"
         return
     }
@@ -1103,8 +1117,13 @@ function Start-DashboardProcess {
     }
 
     Remove-Item -LiteralPath $dashboardOutLog, $dashboardErrLog -Force -ErrorAction SilentlyContinue
+    $dashboardArguments = @("-m", "hermes_cli.main", "dashboard", "--host", "127.0.0.1", "--port", "9119", "--no-open")
+    if (-not [string]::IsNullOrWhiteSpace($OAuthProvider)) {
+        $dashboardArguments += @("--oauth-provider", $OAuthProvider)
+    }
+
     $process = Start-Process -FilePath $pythonExe `
-        -ArgumentList @("-m", "hermes_cli.main", "dashboard", "--host", "127.0.0.1", "--port", "9119", "--no-open") `
+        -ArgumentList $dashboardArguments `
         -WorkingDirectory $runtimeDir `
         -RedirectStandardOutput $dashboardOutLog `
         -RedirectStandardError $dashboardErrLog `
@@ -1231,7 +1250,7 @@ try {
     Write-LauncherLine "Portable target: standard Hermes runtime with portable Python."
 
     Ensure-LocalOllamaReady
-    Start-DashboardProcess
+    Start-DashboardProcess -OAuthProvider $OAuthProvider
 
     if (-not $headless) {
         if (-not $NoOpenBrowser) {
@@ -1485,12 +1504,23 @@ try {
     if ($codexText -notmatch "HermesGo codex compatibility launcher") {
         throw "codex compatibility launcher did not print the expected banner."
     }
+    $codexLoginHelpOutput = & cmd /c "call `"$codexCmd`" login --help" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "codex login help probe failed with exit code $LASTEXITCODE"
+    }
+    $codexLoginHelpText = ($codexLoginHelpOutput -join "`n")
+    if ($codexLoginHelpText -match "unrecognized arguments:\s+login") {
+        throw "codex login compatibility launcher still leaks the login subcommand into Hermes."
+    }
+    if ($codexLoginHelpText -notmatch "Add a pooled credential") {
+        throw "codex login help probe did not reach the Hermes auth add command."
+    }
 
     cmd /c "call `"$root\HermesGo.bat`" -NoOpenBrowser -NoOpenChat"
     if ($LASTEXITCODE -ne 0) { throw "HermesGo.bat failed with exit code $LASTEXITCODE" }
     Assert-Contains $launcherLog "HermesGo finished with exit code 0."
     Assert-Contains $launcherLog "Ollama model store: $ollamaModelsDir"
-    Assert-Contains $launcherLog "Dashboard browser URL: http://127.0.0.1:9119/config"
+    Assert-Contains $launcherLog "Dashboard browser URL: http://127.0.0.1:9119/env?oauth=openai-codex"
     $response = Invoke-DirectHttpRequest -Uri $dashboardUrl -TimeoutSec 5
     if ($response.StatusCode -ne 200 -or $response.Content -notmatch "<title>Hermes Agent</title>") {
         throw "Dashboard probe did not return the Hermes UI."
@@ -1533,13 +1563,13 @@ try {
 $packageReadme = @'
 # HermesGo
 
-HermesGo is the Windows green bundle for Hermes Agent.
+HermesGo is the Windows green bundle for Hermes Agent. It is also intended to serve as a USB-friendly, one-click install package with a built-in local model runtime.
 
 ## Download
 
 - Latest release page: <https://github.com/wangkj123/HermesGo/releases/latest>
-- Full offline package: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1531.zip>
-- Checksum file: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1531.sha256.txt>
+- The downloadable zip and checksum are published on the release page above.
+- Older release versions remain published on GitHub Releases and are not deleted.
 
 The full package is about 1.6 GB and includes everything needed to run directly:
 
@@ -1548,34 +1578,37 @@ The full package is about 1.6 GB and includes everything needed to run directly:
 - Portable Python
 - Portable Ollama runtime
 - Default Ollama 2B model store
-- `HermesGo.exe` with a horse-head icon
-- Bundled `codex.cmd` compatibility launcher
+- `HermesGo.exe` with a horse-head icon, a classic beginner launcher, a selectable action box, and a contextual explanation area under the selection
+- Bundled `codex.cmd` compatibility launcher for the release package, not an external Codex CLI dependency
+- `tutorial/` with numbered screenshots and usage notes for new users
 
 ## How to use
 
 1. Download the full zip. It keeps the top-level `HermesGo/` directory.
 2. Extract the whole `HermesGo/` directory. Do not copy only `HermesGo.exe`.
-3. Double-click `HermesGo.exe`. It opens the Dashboard `Config` page in your browser and starts the `HermesGo Chat` window.
-4. If you prefer the batch entry, double-click `HermesGo.bat`.
+3. Double-click `HermesGo.exe`. It opens the classic launcher with a selectable action box for beginner start, OpenAI GPT-5.4 mini, Dashboard / Config, and utility actions for model switching, self-check, logs, config folders, and custom launcher actions from `home/launcher-actions.txt`.
+4. If you prefer the direct entry, double-click `HermesGo.bat`.
 5. For a quick self-check, run `Verify-HermesGo.bat`.
 6. To switch the default local model, run `Switch-HermesGoModel.bat`.
-7. To configure Codex / account login, use the Dashboard `Config` page or run `codex.cmd login`.
+7. Local 2B startup does not trigger ChatGPT / Codex sign-in. Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing.
+8. If you are learning the package, open `tutorial/README.md` first and follow the numbered screenshots.
 
 ## Directory map
 
 | Path | Purpose |
 |---|---|
-| `HermesGo.exe` | Main green-bundle entrypoint with the custom icon |
-| `HermesGo.bat` | Batch entrypoint for double-click launch |
+| `HermesGo.exe` | Classic launcher entrypoint with beginner, cloud, advanced, utility, and custom choices |
+| `HermesGo.bat` | Direct entrypoint for the full runtime |
 | `Start-HermesGo.ps1` | Main launcher that starts runtime, Dashboard, and chat |
 | `Verify-HermesGo.bat` / `Verify-HermesGo.ps1` | Structure and runtime verification |
 | `Switch-HermesGoModel.bat` / `Switch-HermesGoModel.ps1` | Switch the default local model |
-| `codex.cmd` | Codex-compatible shim that routes into Hermes login flow |
+| `codex.cmd` | Bundled Codex-compatible shim used by the release package |
 | `runtime/` | Packaged runtime files |
 | `home/` | Persistent config, sessions, state, and memory |
 | `data/` | Runtime data |
 | `data/ollama/` | Bundled Ollama model store |
 | `data/ollama/models/` | Offline model files and manifests |
+| `tutorial/` | Numbered usage screenshots and notes for new users |
 | `logs/` | Temporary logs |
 | `HermesGo-debug.txt` | Root debug log, refreshed on each launch |
 | `installers/` | Optional installer drop-in directory, not required for runtime |
@@ -1591,10 +1624,15 @@ I did not keep editing the published output directly. I used an isolated test wo
 
 What the verification checks:
 
-- `HermesGo.bat` / `Start-HermesGo.ps1` still start the Dashboard
+- The launcher remembers the last selected item, loads custom actions from `home/launcher-actions.txt`, and shows state-aware explanations for each menu item
+- Cloud / GPT-5.4 mini checks Codex login state before launch and opens the browser login page only when credentials are missing
+- Local start and local model switching still work
+- `HermesGo.bat` / `Start-HermesGo.ps1` still start the Dashboard flow
 - The bundled Ollama 2B model store is available
 - The portable Python runtime is still the bundled one
 - Launch logs are written to `HermesGo-debug.txt`
+- Tutorial screenshots live in `tutorial/`
+- Release packaging excludes local `auth.json` / `auth.lock` credentials from the ship-ready bundle
 
 If you want to keep iterating, do it in the sandbox first and only return to the published package after the sandbox passes.
 '@
@@ -1635,6 +1673,13 @@ setlocal EnableExtensions
 
 set "ROOT=%~dp0"
 set "PYTHON_EXE=%ROOT%runtime\python311\python.exe"
+set "RUNTIME_BIN=%ROOT%runtime\bin"
+set "HERMES_HOME=%ROOT%home"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+set "PATH=%ROOT%;%RUNTIME_BIN%;%PATH%"
+set "PYTHONHOME="
+set "PYTHONPATH="
 
 if not exist "%PYTHON_EXE%" (
     echo HermesGo runtime not found: %PYTHON_EXE%
@@ -1642,15 +1687,12 @@ if not exist "%PYTHON_EXE%" (
 )
 
 if /i "%~1"=="login" (
-    shift
-    "%PYTHON_EXE%" -m hermes_cli.main login --provider openai-codex %*
+    "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~2 %~3 %~4 %~5 %~6 %~7 %~8 %~9
     exit /b %ERRORLEVEL%
 )
 
 if /i "%~1"=="auth" if /i "%~2"=="login" (
-    shift
-    shift
-    "%PYTHON_EXE%" -m hermes_cli.main login --provider openai-codex %*
+    "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~3 %~4 %~5 %~6 %~7 %~8 %~9
     exit /b %ERRORLEVEL%
 )
 
@@ -1669,7 +1711,7 @@ exit /b 0
 $builderReadme = @'
 # create_hermes_go
 
-这个目录负责 HermesGo 的构建和测试。
+这个目录负责 HermesGo 的构建和测试，也包含这条绿色版 / U 盘版 / 一键安装版 release 线的生成脚本。
 
 ## 当前路线
 
@@ -1677,7 +1719,9 @@ $builderReadme = @'
 - 用官方 embeddable Python 替换本机系统 Python
 - 默认切换到 Ollama 本地模型，避免云端 token 依赖
 - `create_hermes_go/output/HermesGo` 是最终交付目录，复制整个目录即可离线运行
-- 生成时会带上 `HermesGo.exe` 的应用图标和 `codex.cmd` 兼容入口，并把测试工作区放到独立沙箱里验证
+- 生成时会带上 `HermesGo.exe` 的应用图标、经典启动器和 `codex.cmd` 兼容入口，并把测试工作区放到独立沙箱里验证
+- 生成时也会把 `tutorial/` 一起带上，方便新手按编号图片学习使用
+- 这条 release 线不依赖外部安装的 Codex CLI；本地 2B 不会触发 ChatGPT / Codex 登录，只有 Cloud 路线在缺少授权时才自动登录
 
 ## 入口
 
@@ -1685,6 +1729,43 @@ $builderReadme = @'
 - `Create-HermesGo.ps1`
 - `test/Prepare-HermesGoTestWorkspace.ps1`
 - `test/Verify-HermesGoTestWorkspace.ps1`
+'@
+
+$doc003 = @'
+# 003-绿色版 / U盘版 / 一键安装版更新说明
+
+## 这次新版本是什么
+
+这是 Hermes Agent 的 Windows 绿色版新分支，也可以理解为 U 盘版、一键安装版、自带大模型版。
+
+这版的目标不是替换旧版本，而是新增一条更适合便携分发的发布线：
+
+- 绿色版，解压即用
+- U 盘版，整包可直接拷贝运行
+- 一键安装版，自带本地 Ollama 大模型
+- 不依赖系统里另外安装 Python、Ollama 或外部 Codex CLI
+
+## 新版本特性
+
+- `HermesGo.exe` 是主入口，保留经典启动器，适合新手直接点选。
+- 本地 2B 启动只走离线模型，不会触发 ChatGPT / Codex 登录。
+- `Cloud: GPT-5.4 Mini` 只有在未登录时才会自动发起 Codex 登录。
+- OpenAI Codex 登录走的是 Hermes 自己内置的浏览器 / 认证流程，不依赖外部安装的 Codex CLI。
+- 绿色包不会携带本地 `auth.json`、`auth.lock` 这类账号凭据文件。
+- 原来的版本保留在 GitHub Releases，不删除、不覆盖。
+
+## 兼容性说明
+
+- 旧版继续可用，适合已经习惯原工作流的用户。
+- 新版新增的是绿色版 / U 盘版 / 一键安装版的便携体验。
+- 如果你只想跑本地大模型，直接用本地 2B 入口即可。
+- 如果你要云端能力，只在 `Cloud: GPT-5.4 Mini` 里登录一次即可。
+
+## 发布约定
+
+- 源码会和 release 一起同步到 GitHub。
+- 新版只追加，不删除旧版。
+- 代码更新说明会明确写出：绿色版、U 盘版、一键安装版、自带大模型、OpenAI Codex 登录路径。
 '@
 
 $doc001 = @'
@@ -1749,6 +1830,9 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\Switch-HermesGoModel.bat")
 Write-Utf8File -Path (Join-Path $OutputDir "codex.cmd") -Content $codexCmd
 Write-Utf8File -Path (Join-Path $OutputDir "README.md") -Content $packageReadme
 Write-Utf8File -Path (Join-Path $OutputDir "installers\README.md") -Content $installerReadme
+if (Test-Path -LiteralPath (Join-Path $builderRoot "tutorial")) {
+    Copy-Tree -Source (Join-Path $builderRoot "tutorial") -Destination (Join-Path $OutputDir "tutorial")
+}
 Reset-OutputHomeState -HomeDir (Join-Path $OutputDir "home")
 Write-Utf8File -Path (Join-Path $OutputDir "home\portable-defaults.txt") -Content @"
 ; Portable fallback defaults for HermesGo
@@ -1760,10 +1844,11 @@ Write-Utf8File -Path (Join-Path $OutputDir "home\config.yaml") -Content $homeCon
 Write-Utf8File -Path (Join-Path $OutputDir "home\.env") -Content ""
 Write-Step "Creating HermesGo application icon"
 $iconPath = Join-Path $OutputDir "HermesGo.ico"
-New-HermesGoIcon -OutputPath $iconPath
+New-HermesGoIcon -OutputPath $iconPath -PngOutputPath (Join-Path $OutputDir "HermesGo-logo.png")
 Build-HermesGoExe -SourcePath (Join-Path $builderRoot "HermesGoBootstrap.cs") -OutputPath (Join-Path $OutputDir "HermesGo.exe") -IconPath $iconPath
 Write-Utf8File -Path (Join-Path $builderRoot "README.md") -Content $builderReadme
 Write-Utf8File -Path (Join-Path $docsDir "001-当前状态与标准边界.md") -Content $doc001
 Write-Utf8File -Path (Join-Path $docsDir "002-便携构建步骤与后续工作.md") -Content $doc002
+Write-Utf8File -Path (Join-Path $docsDir "003-green-usb-oneclick-release-notes.md") -Content $doc003
 
 Write-Step "Portable HermesGo output created at $OutputDir"
