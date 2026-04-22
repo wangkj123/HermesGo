@@ -1,38 +1,18 @@
 # create_hermes_go
 
-这个目录负责 HermesGo 绿色版 / U 盘版 / 一键安装版的构建、测试和 release 产物生成。
+这个目录负责 HermesGo 的构建和测试，也包含这条绿色版 / U 盘版 / 一键安装版 release 线的生成脚本。
 
-## 这条线的关键词
+## 当前路线
 
-- HermesGo / HermesGo
-- Hermes Agent / Hermes Agent
-- 绿色版 / green package
-- U 盘版 / USB bundle
-- 一键安装版 / one-click install
-- 便携版 / portable bundle
-- USB 版 / USB-friendly package
-- Windows 便携 / Windows portable
-- 本地模型 / local model
-- Ollama / Ollama
-- OpenAI Codex / OpenAI Codex
-- GPT-5.4 Mini / GPT-5.4 Mini
-
-## 当前目标
-
-- 用官方 Hermes 源码和当前工作区生成绿色包
-- 用 embeddable Python 替换本机 Python
-- 默认切换到 Ollama 本地模型，减少云端 token 依赖
-- 把最终交付目录固定输出到 `create_hermes_go/output/HermesGo`
-- 生成 `HermesGo.exe`、`HermesGo.bat`、`Verify-HermesGo.bat`、`Switch-HermesGoModel.bat`
-- 带上 `tutorial/`、构建说明和 release notes，方便新用户直接上手
-
-## 这条 release 线的规则
-
-- 本地 2B 启动不触发 ChatGPT / Codex 登录
-- 只有 `Cloud: GPT-5.4 Mini` 在缺少授权时才自动进入登录流程
-- OpenAI Codex 不依赖外部安装的 Codex CLI，认证也走 Hermes 自带链路
-- 发布包不携带本地 `auth.json`、`auth.lock` 这类账号凭据
-- 老版本继续保留在 GitHub Releases，不删除、不覆盖
+- 用官方 Hermes 源码和当前工作区依赖生成绿色包
+- 用官方 embeddable Python 替换本机系统 Python
+- 默认切换到 Ollama 本地模型，避免云端 token 依赖
+- `create_hermes_go/output/HermesGo` 是最终交付目录，复制整个目录即可离线运行
+- 生成时会带上 `HermesGo.exe` 的应用图标、经典启动器和 `codex.cmd` 兼容入口，并把测试工作区放到独立沙箱里验证
+- 生成时也会把 `tutorial/` 一起带上，方便新手按编号图片学习使用
+- 这条 release 线不依赖外部安装的 Codex CLI；本地 2B 不会触发 ChatGPT / Codex 登录，只有 Cloud 路线在缺少授权时才自动登录
+- 当前版本信息来自 `create_hermes_go/release-state.json`
+- 更新下载包名、checksum 和 release tag 时，先改 `Sync-HermesGoReleaseState.ps1` 使用的状态文件，再重新生成
 - 当前发布版本：`HermesGo-2026.04.22-2025`
 - 当前 zip：`HermesGo-2026.04.22-2025.zip`
 - 当前 checksum：`HermesGo-2026.04.22-2025.zip.sha256.txt`

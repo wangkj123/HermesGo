@@ -1,53 +1,40 @@
-# 003-绿色版 / U 盘版 / 一键安装版更新说明
+# 003-绿色版 / U盘版 / 一键安装版更新说明
 
-## 这是什么新版本
+## 这次新版本是什么
 
-这是 Hermes Agent 的 Windows 绿色版新分支，也可以理解为：
+这是 Hermes Agent 的 Windows 绿色版新分支，也可以理解为 U 盘版、一键安装版、自带大模型版。
 
-- 绿色版
-- U 盘版
-- 一键安装版
-- 便携版
-- 自带本地模型的 HermesGo
+这版的目标不是替换旧版本，而是新增一条更适合便携分发的发布线：
 
-这个版本不是替换旧版，而是新增一条更适合分发、拷贝和搜索的 release 线。
+- 绿色版，解压即用
+- U 盘版，整包可直接拷贝运行
+- 一键安装版，自带本地 Ollama 大模型
+- 不依赖系统里另外安装 Python、Ollama 或外部 Codex CLI
 
-## 这次更新的重点
+## 新版本特性
 
-- `HermesGo.exe` 仍然是主入口，保留经典启动器，适合新用户直接点击
-- 本地 2B 启动只走离线模型，不触发 ChatGPT / Codex 登录
-- `Cloud: GPT-5.4 Mini` 只在缺少授权时才自动拉起登录流程
-- OpenAI Codex 的登录链路由 Hermes 自己实现，不依赖外部安装的 Codex CLI
-- 绿色包不会携带本地 `auth.json`、`auth.lock` 这类账号凭据文件
-- 源码和 release 会一起同步到 GitHub，旧版本继续保留，不删除、不覆盖
+- `HermesGo.exe` 是主入口，保留经典启动器，适合新手直接点选。
+- 本地 2B 启动只走离线模型，不会触发 ChatGPT / Codex 登录。
+- `Cloud: GPT-5.4 Mini` 只有在未登录时才会自动发起 Codex 登录。
+- OpenAI Codex 登录走的是 Hermes 自己内置的浏览器 / 认证流程，不依赖外部安装的 Codex CLI。
+- 绿色包不会携带本地 `auth.json`、`auth.lock` 这类账号凭据文件。
+- 原来的版本保留在 GitHub Releases，不删除、不覆盖。
 
-## 适合搜索的关键词
+## 兼容性说明
 
-HermesGo / HermesGo,
-Hermes Agent / Hermes Agent,
-绿色版 / green package,
-U 盘版 / USB bundle,
-一键安装版 / one-click install,
-便携版 / portable bundle,
-USB 版 / USB-friendly package,
-Windows 便携 / Windows portable,
-本地模型 / local model,
-Ollama / Ollama,
-OpenAI Codex / OpenAI Codex,
-GPT-5.4 Mini / GPT-5.4 Mini
+- 旧版继续可用，适合已经习惯原工作流的用户。
+- 新版新增的是绿色版 / U 盘版 / 一键安装版的便携体验。
+- 如果你只想跑本地大模型，直接用本地 2B 入口即可。
+- 如果你要云端能力，只在 `Cloud: GPT-5.4 Mini` 里登录一次即可。
 
-## 用户怎么理解这条线
+## 发布约定
 
-- 如果只想跑本地模型，直接用本地 2B 入口
-- 如果要云端能力，只用 `Cloud: GPT-5.4 Mini`
-- 如果要换账号或重新授权，只用 Hermes 自带登录入口
-
-## release 约定
-
-- 新版本只追加，不删除旧版本
-- 代码更新、release 更新和说明文档一起发布
-- 下载页和仓库首页都保留最新 release 链接
+- 源码会和 release 一起同步到 GitHub。
+- 新版只追加，不删除旧版。
+- 代码更新说明会明确写出：绿色版、U 盘版、一键安装版、自带大模型、OpenAI Codex 登录路径。
+- 当前版本信息由 `create_hermes_go/release-state.json` 统一管理。
+- 发布或改名时，先更新状态文件，再运行 `Sync-HermesGoReleaseState.ps1`。
 - 当前版本：`HermesGo-2026.04.22-2025`
 - 当前 zip：`HermesGo-2026.04.22-2025.zip`
 - 当前 checksum：`HermesGo-2026.04.22-2025.zip.sha256.txt`
-- `HermesGo-2026.04.21-*` 是昨天的旧包，保留但不是今天的下载项
+- `HermesGo-2026.04.21-*` 是昨天的旧包，保留但不是今天的下载项。

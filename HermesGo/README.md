@@ -2,9 +2,11 @@
 
 HermesGo is the Windows green bundle for Hermes Agent. It is also intended to serve as a USB-friendly, one-click install package with a built-in local model runtime.
 
-Current download package: `HermesGo-2026.04.22-2025.zip`
-Current checksum file: `HermesGo-2026.04.22-2025.zip.sha256.txt`
-Current release tag: `HermesGo-2026.04.22-2025`
+Current download package: HermesGo-2026.04.22-2025.zip
+Current checksum file: HermesGo-2026.04.22-2025.zip.sha256.txt
+Current release tag: HermesGo-2026.04.22-2025
+This page is generated from `create_hermes_go/release-state.json`.
+Use `create_hermes_go/Sync-HermesGoReleaseState.ps1` to update the package names and refresh the docs.
 
 Search keywords:
 HermesGo / HermesGo,
@@ -26,7 +28,7 @@ GPT-5.4 Mini / GPT-5.4 Mini.
 - The downloadable zip and checksum are published on the release page above.
 - Older release versions remain published on GitHub Releases and are not deleted.
 - This repository keeps the old releases intact and adds a new searchable green-package line.
-- If you only see `HermesGo-2026.04.21-*`, that is the older archive and not the current package.
+- If you only see HermesGo-2026.04.21-*, that is the older archive and not the current package.
 
 The full package is about 1.6 GB and includes everything needed to run directly:
 

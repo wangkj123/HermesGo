@@ -1,0 +1,8 @@
+{
+    "currentReleaseTag":  "HermesGo-2026.04.22-2025",
+    "currentReleaseZip":  "HermesGo-2026.04.22-2025.zip",
+    "currentReleaseSha":  "HermesGo-2026.04.22-2025.zip.sha256.txt",
+    "previousReleasePattern":  "HermesGo-2026.04.21-*",
+    "githubRepository":  "wangkj123/HermesGo",
+    "githubHomepage":  "https://github.com/wangkj123/HermesGo/releases/latest"
+}

@@ -2,9 +2,11 @@
 
 This repository packages Hermes Agent into the HermesGo Windows green bundle.
 
-Current download package: `HermesGo-2026.04.22-2025.zip`
-Current checksum file: `HermesGo-2026.04.22-2025.zip.sha256.txt`
-Current release tag: `HermesGo-2026.04.22-2025`
+Current download package: HermesGo-2026.04.22-2025.zip
+Current checksum file: HermesGo-2026.04.22-2025.zip.sha256.txt
+Current release tag: HermesGo-2026.04.22-2025
+This page is generated from `create_hermes_go/release-state.json`.
+Use `create_hermes_go/Sync-HermesGoReleaseState.ps1` to update the package names and refresh the docs.
 
 Search keywords:
 HermesGo / HermesGo,
@@ -25,7 +27,7 @@ GPT-5.4 Mini / GPT-5.4 Mini.
 - Latest release page: <https://github.com/wangkj123/HermesGo/releases/latest>
 - The downloadable zip and checksum are published on the release page above.
 - Older release versions remain published on GitHub Releases and are not deleted.
-- Yesterday's archive `HermesGo-2026.04.21-*` is the older version; it is kept on purpose.
+- Yesterday's archive HermesGo-2026.04.21-* is the older version; it is kept on purpose.
 
 ## What this repo contains
 
