@@ -1,13 +1,15 @@
 # HermesGo Release Workspace
 
-This repository packages Hermes Agent into a Windows green bundle called HermesGo.
-Search keywords: HermesGo, Hermes Agent, 绿色版, U盘版, 一键安装版, 便携版, 绿色包, USB版, Windows便携, 本地模型, Ollama, OpenAI Codex, GPT-5.4 Mini.
+This repository packages Hermes Agent into the HermesGo Windows green bundle.
+
+Search keywords:
+HermesGo, Hermes Agent, 绿色版, U 盘版, 一键安装版, 便携版, USB 版, Windows 便携, 本地模型, Ollama, OpenAI Codex, GPT-5.4 Mini.
 
 ## What users should download
 
 - Latest release page: <https://github.com/wangkj123/HermesGo/releases/latest>
-- Full offline package: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1852.zip>
-- SHA256 checksum: <https://github.com/wangkj123/HermesGo/releases/download/v2026.4.21/HermesGo-2026.04.21-1852.sha256.txt>
+- The downloadable zip and checksum are published on the release page above.
+- Older release versions remain published on GitHub Releases and are not deleted.
 
 ## What this repo contains
 

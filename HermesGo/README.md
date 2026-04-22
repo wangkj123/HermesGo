@@ -2,7 +2,8 @@
 
 HermesGo is the Windows green bundle for Hermes Agent. It is also intended to serve as a USB-friendly, one-click install package with a built-in local model runtime.
 
-Search keywords: HermesGo, Hermes Agent, 绿色版, U盘版, 一键安装版, 便携版, 绿色包, USB版, Windows便携, 本地模型, Ollama, OpenAI Codex, GPT-5.4 Mini.
+Search keywords:
+HermesGo, Hermes Agent, 绿色版, U 盘版, 一键安装版, 便携版, USB 版, Windows 便携, 本地模型, Ollama, OpenAI Codex, GPT-5.4 Mini.
 
 ## Download
 
