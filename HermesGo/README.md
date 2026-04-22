@@ -2,11 +2,14 @@
 
 HermesGo is the Windows green bundle for Hermes Agent. It is also intended to serve as a USB-friendly, one-click install package with a built-in local model runtime.
 
+Search keywords: HermesGo, Hermes Agent, 绿色版, U盘版, 一键安装版, 便携版, 绿色包, USB版, Windows便携, 本地模型, Ollama, OpenAI Codex, GPT-5.4 Mini.
+
 ## Download
 
 - Latest release page: <https://github.com/wangkj123/HermesGo/releases/latest>
 - The downloadable zip and checksum are published on the release page above.
 - Older release versions remain published on GitHub Releases and are not deleted.
+- This repository keeps the old releases intact and adds a new searchable green-package line.
 
 The full package is about 1.6 GB and includes everything needed to run directly:
 

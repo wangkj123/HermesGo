@@ -1,6 +1,7 @@
 # HermesGo Release Workspace
 
 This repository packages Hermes Agent into a Windows green bundle called HermesGo.
+Search keywords: HermesGo, Hermes Agent, 绿色版, U盘版, 一键安装版, 便携版, 绿色包, USB版, Windows便携, 本地模型, Ollama, OpenAI Codex, GPT-5.4 Mini.
 
 ## What users should download
 
@@ -13,6 +14,7 @@ This repository packages Hermes Agent into a Windows green bundle called HermesG
 - Source and packaging scripts for the HermesGo green package
 - The standalone test workspace under `create_hermes_go/test`
 - Release notes, packaging docs, and build scripts
+- Searchable release keywords for the green / USB / one-click install line
 
 ## How to work on it safely
 
