@@ -33,6 +33,12 @@ Use scripts as the source of truth. Do not hand-edit release names, download nam
 - It keeps the release text, repository description, and package documentation aligned.
 - It makes future release updates repeatable without relying on manual copy/paste.
 
+## Archiving
+
+- When a release sync task is finished, record the final state in `logs/agent-progress.md`.
+- Keep the strategy, state file, and generated docs in the repository so the next run can repeat the same flow.
+- Do not give this release line special handling after completion; follow the same script-driven process every time.
+
 ## Search keywords
 
 HermesGo / HermesGo, Hermes Agent / Hermes Agent, 绿色版 / green package, U 盘版 / USB bundle, 一键安装版 / one-click install, 便携版 / portable bundle, USB 版 / USB-friendly package, Windows 便携 / Windows portable, 本地模型 / local model, Ollama / Ollama, OpenAI Codex / OpenAI Codex, GPT-5.4 Mini / GPT-5.4 Mini
