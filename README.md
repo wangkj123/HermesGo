@@ -21,6 +21,10 @@ GPT-5.4 Mini / GPT-5.4 Mini.
 - Latest release page: <https://github.com/wangkj123/HermesGo/releases/latest>
 - The downloadable zip and checksum are published on the release page above.
 - Older release versions remain published on GitHub Releases and are not deleted.
+- Current release: `HermesGo-2026.04.22-2025`
+- Current zip: `HermesGo-2026.04.22-2025.zip`
+- Current checksum: `HermesGo-2026.04.22-2025.zip.sha256.txt`
+- Yesterday's archive `HermesGo-2026.04.21-*` is the older version; it is kept on purpose.
 
 ## What this repo contains
 

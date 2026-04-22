@@ -47,3 +47,7 @@ GPT-5.4 Mini / GPT-5.4 Mini
 - 新版本只追加，不删除旧版本
 - 代码更新、release 更新和说明文档一起发布
 - 下载页和仓库首页都保留最新 release 链接
+- 当前版本：`HermesGo-2026.04.22-2025`
+- 当前 zip：`HermesGo-2026.04.22-2025.zip`
+- 当前 checksum：`HermesGo-2026.04.22-2025.zip.sha256.txt`
+- `HermesGo-2026.04.21-*` 是昨天的旧包，保留但不是今天的下载项

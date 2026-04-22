@@ -33,6 +33,9 @@
 - OpenAI Codex 不依赖外部安装的 Codex CLI，认证也走 Hermes 自带链路
 - 发布包不携带本地 `auth.json`、`auth.lock` 这类账号凭据
 - 老版本继续保留在 GitHub Releases，不删除、不覆盖
+- 当前发布版本：`HermesGo-2026.04.22-2025`
+- 当前 zip：`HermesGo-2026.04.22-2025.zip`
+- 当前 checksum：`HermesGo-2026.04.22-2025.zip.sha256.txt`
 
 ## 入口
 
