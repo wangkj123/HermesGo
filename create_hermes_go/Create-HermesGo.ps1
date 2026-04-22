@@ -70,6 +70,10 @@ $portableDefaults = Get-PortableDefaults -Path $portableDefaultsPath
 $defaultOllamaModel = $portableDefaults.DEFAULT_OLLAMA_MODEL
 $defaultOllamaProvider = $portableDefaults.DEFAULT_OLLAMA_PROVIDER
 $defaultOllamaBaseUrl = $portableDefaults.DEFAULT_OLLAMA_BASE_URL
+$currentReleaseTag = "HermesGo-2026.04.22-2025"
+$currentReleaseZip = "HermesGo-2026.04.22-2025.zip"
+$currentReleaseSha = "HermesGo-2026.04.22-2025.zip.sha256.txt"
+$previousReleasePattern = "HermesGo-2026.04.21-*"
 
 function Write-Step {
     param([string]$Message)
@@ -1567,9 +1571,13 @@ HermesGo is the Windows green bundle for Hermes Agent. It is also intended to se
 
 ## Download
 
+- Current download package: `__CURRENT_RELEASE_ZIP__`
+- Current checksum file: `__CURRENT_RELEASE_SHA__`
+- Current release tag: `__CURRENT_RELEASE_TAG__`
 - Latest release page: <https://github.com/wangkj123/HermesGo/releases/latest>
 - The downloadable zip and checksum are published on the release page above.
 - Older release versions remain published on GitHub Releases and are not deleted.
+- Yesterday's archive `__PREVIOUS_RELEASE_PATTERN__` is the older version; it is kept on purpose.
 
 The full package is about 1.6 GB and includes everything needed to run directly:
 
@@ -1722,6 +1730,9 @@ $builderReadme = @'
 - 生成时会带上 `HermesGo.exe` 的应用图标、经典启动器和 `codex.cmd` 兼容入口，并把测试工作区放到独立沙箱里验证
 - 生成时也会把 `tutorial/` 一起带上，方便新手按编号图片学习使用
 - 这条 release 线不依赖外部安装的 Codex CLI；本地 2B 不会触发 ChatGPT / Codex 登录，只有 Cloud 路线在缺少授权时才自动登录
+- 当前发布版本：`__CURRENT_RELEASE_TAG__`
+- 当前 zip：`__CURRENT_RELEASE_ZIP__`
+- 当前 checksum：`__CURRENT_RELEASE_SHA__`
 
 ## 入口
 
@@ -1766,6 +1777,10 @@ $doc003 = @'
 - 源码会和 release 一起同步到 GitHub。
 - 新版只追加，不删除旧版。
 - 代码更新说明会明确写出：绿色版、U 盘版、一键安装版、自带大模型、OpenAI Codex 登录路径。
+- 当前版本：`__CURRENT_RELEASE_TAG__`
+- 当前 zip：`__CURRENT_RELEASE_ZIP__`
+- 当前 checksum：`__CURRENT_RELEASE_SHA__`
+- `__PREVIOUS_RELEASE_PATTERN__` 是昨天的旧包，保留但不是今天的下载项。
 '@
 
 $doc001 = @'
@@ -1813,6 +1828,20 @@ $doc002 = @'
 4. 给绿色包增加一个目录白名单校验，防止升级后多出杂文件
 5. 继续补强 Dashboard / 浏览器启动兼容性
 '@
+
+$packageReadme = $packageReadme.Replace("__CURRENT_RELEASE_TAG__", $currentReleaseTag)
+$packageReadme = $packageReadme.Replace("__CURRENT_RELEASE_ZIP__", $currentReleaseZip)
+$packageReadme = $packageReadme.Replace("__CURRENT_RELEASE_SHA__", $currentReleaseSha)
+$packageReadme = $packageReadme.Replace("__PREVIOUS_RELEASE_PATTERN__", $previousReleasePattern)
+
+$builderReadme = $builderReadme.Replace("__CURRENT_RELEASE_TAG__", $currentReleaseTag)
+$builderReadme = $builderReadme.Replace("__CURRENT_RELEASE_ZIP__", $currentReleaseZip)
+$builderReadme = $builderReadme.Replace("__CURRENT_RELEASE_SHA__", $currentReleaseSha)
+
+$doc003 = $doc003.Replace("__CURRENT_RELEASE_TAG__", $currentReleaseTag)
+$doc003 = $doc003.Replace("__CURRENT_RELEASE_ZIP__", $currentReleaseZip)
+$doc003 = $doc003.Replace("__CURRENT_RELEASE_SHA__", $currentReleaseSha)
+$doc003 = $doc003.Replace("__PREVIOUS_RELEASE_PATTERN__", $previousReleasePattern)
 
 $setupOllamaBat = $setupOllamaBat.Replace("__DEFAULT_OLLAMA_MODEL__", $defaultOllamaModel)
 $homeConfig = $homeConfig.Replace("__DEFAULT_OLLAMA_PROVIDER__", $defaultOllamaProvider)
