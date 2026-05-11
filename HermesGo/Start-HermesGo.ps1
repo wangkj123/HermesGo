@@ -24,6 +24,18 @@ function Resolve-PortablePath {
 }
 
 $root = Resolve-PortablePath -Path $PSScriptRoot
+# If the script is in app/scripts/, resolve root to app/ (parent of scripts)
+if (-not (Test-Path -LiteralPath (Join-Path $root "runtime\python311\python.exe"))) {
+    # Parent directory (dev layout: scripts/ or nested copy next to runtime/)
+    $parentRoot = Resolve-PortablePath -Path (Join-Path $PSScriptRoot "..")
+    if (Test-Path -LiteralPath (Join-Path $parentRoot "runtime\python311\python.exe")) {
+        $root = $parentRoot
+    }
+    # ZIP layout: Start-HermesGo.ps1 at HermesGo/ root, runtimes under HermesGo/app/
+    elseif (Test-Path -LiteralPath (Join-Path $root "app\runtime\python311\python.exe")) {
+        $root = Join-Path $root "app"
+    }
+}
 $pythonExe = Join-Path $root "runtime\python311\python.exe"
 $runtimeDir = Join-Path $root "runtime\hermes-agent"
 $runtimeBinDir = Join-Path $root "runtime\bin"
@@ -34,7 +46,9 @@ $debugLog = Join-Path $root "HermesGo-debug.txt"
 $dashboardOutLog = Join-Path $tmpLogDir "HermesGo-dashboard.out.txt"
 $dashboardErrLog = Join-Path $tmpLogDir "HermesGo-dashboard.err.txt"
 $dashboardUrl = "http://127.0.0.1:9119/"
-$dashboardBrowserUrl = "http://127.0.0.1:9119/config"
+$dashboardBrowserUrl = "http://127.0.0.1:9119/env?quick=1"
+$webuiUrl = "http://127.0.0.1:8787/"
+$webuiDir = Join-Path $root "runtime\hermes-webui"
 $headless = $env:HERMESGO_HEADLESS -eq "1"
 $preserveDebugLog = $env:HERMESGO_APPEND_DEBUG_LOG -eq "1"
 $proxyBypassDefaults = @(
@@ -290,6 +304,103 @@ function Get-LocalOllamaConfig {
     }
 }
 
+function Get-ConfigModelProvider {
+    $configPath = Join-Path $homeDir "config.yaml"
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        return ""
+    }
+    $configText = Get-Content -LiteralPath $configPath -Raw -Encoding utf8
+    $providerMatch = [regex]::Match($configText, '(?m)^\s*provider:\s*"?(?<v>[^"\r\n]+)"?\s*$')
+    if (-not $providerMatch.Success) {
+        return ""
+    }
+    return $providerMatch.Groups["v"].Value.Trim().ToLowerInvariant()
+}
+
+function Get-HermesEnvValue {
+    param([string]$Key)
+
+    if ([string]::IsNullOrWhiteSpace($Key)) {
+        return ""
+    }
+
+    $value = [Environment]::GetEnvironmentVariable($Key, "Process")
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return $value.Trim()
+    }
+
+    $envPath = Join-Path $homeDir ".env"
+    if (-not (Test-Path -LiteralPath $envPath)) {
+        return ""
+    }
+
+    foreach ($line in (Get-Content -LiteralPath $envPath -Encoding utf8)) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#")) {
+            continue
+        }
+        $parts = $trimmed.Split("=", 2)
+        if ($parts.Count -ne 2) {
+            continue
+        }
+        if ($parts[0].Trim() -ne $Key) {
+            continue
+        }
+        return $parts[1].Trim()
+    }
+
+    return ""
+}
+
+function Set-ConfigModelRoute {
+    param(
+        [string]$Provider,
+        [string]$Model,
+        [string]$BaseUrl
+    )
+
+    $configPath = Join-Path $homeDir "config.yaml"
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        return $false
+    }
+
+    $configText = Get-Content -LiteralPath $configPath -Raw -Encoding utf8
+    $escapedProvider = $Provider.Replace("\", "\\").Replace('"', '\"')
+    $escapedModel = $Model.Replace("\", "\\").Replace('"', '\"')
+    $escapedBaseUrl = $BaseUrl.Replace("\", "\\").Replace('"', '\"')
+
+    $updated = $configText
+    $updated = [regex]::Replace($updated, '(?m)^(\s*provider:\s*).*$','${1}"' + $escapedProvider + '"')
+    $updated = [regex]::Replace($updated, '(?m)^(\s*default:\s*).*$','${1}"' + $escapedModel + '"')
+    $updated = [regex]::Replace($updated, '(?m)^(\s*base_url:\s*).*$','${1}"' + $escapedBaseUrl + '"')
+
+    if ($updated -eq $configText) {
+        return $false
+    }
+
+    Set-Content -LiteralPath $configPath -Value $updated -Encoding utf8
+    return $true
+}
+
+function Apply-CloudPreferredRouteIfAvailable {
+    # Only auto-upgrade when still on local ollama fallback.
+    $provider = Get-ConfigModelProvider
+    if ($provider -and $provider -ne "ollama") {
+        Write-LauncherLine "Cloud auto-route skipped: current provider is $provider"
+        return
+    }
+
+    $deepseekKey = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
+    if (-not [string]::IsNullOrWhiteSpace($deepseekKey)) {
+        if (Set-ConfigModelRoute -Provider "deepseek" -Model "deepseek-v4-pro" -BaseUrl "https://api.deepseek.com/v1") {
+            Write-LauncherLine "Cloud auto-route applied: deepseek/deepseek-v4-pro"
+        } else {
+            Write-LauncherLine "Cloud auto-route already set: deepseek/deepseek-v4-pro"
+        }
+        return
+    }
+}
+
 function Ensure-LocalOllamaReady {
     $ollamaConfig = Get-LocalOllamaConfig
     if (-not $ollamaConfig) {
@@ -365,6 +476,16 @@ function Test-DashboardReady {
     }
 }
 
+function Test-WebUIReady {
+    try {
+        $healthUrl = "http://127.0.0.1:8787/health"
+        $response = Invoke-DirectHttpRequest -Uri $healthUrl -TimeoutSec 3
+        return $response.StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
 function Start-DashboardProcess {
     if (Test-DashboardReady) {
         Write-LauncherLine "Dashboard already reachable: $dashboardUrl"
@@ -408,6 +529,46 @@ function Start-DashboardProcess {
     Add-DebugBlock -Label "dashboard stdout" -Path $dashboardOutLog
     Add-DebugBlock -Label "dashboard stderr" -Path $dashboardErrLog
     throw "Dashboard probe failed. $errTail".Trim()
+}
+
+function Start-WebUIProcess {
+    if (Test-WebUIReady) {
+        Write-LauncherLine "WebUI already reachable: $webuiUrl"
+        return
+    }
+
+    $listener = Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue
+    if ($listener) {
+        $listener | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+            if ($_ -and $_ -ne $PID) {
+                Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    $runPy = Join-Path $webuiDir "run.py"
+    if (-not (Test-Path -LiteralPath $runPy)) {
+        Write-LauncherLine "WebUI run.py not found: $runPy"
+        return
+    }
+
+    $process = Start-Process -FilePath $pythonExe `
+        -ArgumentList @($runPy) `
+        -WorkingDirectory $webuiDir `
+        -PassThru `
+        -WindowStyle Hidden
+    Write-LauncherLine "WebUI process started: PID $($process.Id)"
+
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-ListeningPort -Port 8787) {
+            Write-LauncherLine "WebUI probe succeeded."
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    Write-LauncherLine "WebUI probe timed out after 30s (PID $($process.Id) may still be starting)"
 }
 
 function Start-ChatWindow {
@@ -507,12 +668,16 @@ try {
     $env:PYTHONUTF8 = "1"
     $env:PYTHONIOENCODING = "utf-8"
     Write-LauncherLine "Portable target: standard Hermes runtime with portable Python."
+    Apply-CloudPreferredRouteIfAvailable
 
     Ensure-LocalOllamaReady
     Start-DashboardProcess
+    Start-WebUIProcess
 
     if (-not $headless) {
         if (-not $NoOpenBrowser) {
+            Open-DashboardBrowser -Url $webuiUrl
+            Start-Sleep -Seconds 1
             Open-DashboardBrowser -Url $dashboardBrowserUrl
         }
         if (-not $NoOpenChat) {

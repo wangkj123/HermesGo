@@ -1,6 +1,7 @@
 # HermesGo source control boundaries
 
 # Release and packaging outputs
+dist/
 create_hermes_go/output/
 hermes-release/
 tools/mingit/
