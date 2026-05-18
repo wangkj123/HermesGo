@@ -17,12 +17,20 @@ if not exist "%PYTHON_EXE%" (
 )
 
 if /i "%~1"=="login" (
-    "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~2 %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    if /i "%~2"=="--device-auth" (
+        "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    ) else (
+        "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex %~2 %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    )
     exit /b %ERRORLEVEL%
 )
 
 if /i "%~1"=="auth" if /i "%~2"=="login" (
-    "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    if /i "%~3"=="--device-auth" (
+        "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~4 %~5 %~6 %~7 %~8 %~9
+    ) else (
+        "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    )
     exit /b %ERRORLEVEL%
 )
 

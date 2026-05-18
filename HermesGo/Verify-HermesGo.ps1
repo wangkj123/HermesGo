@@ -10,7 +10,7 @@ $dashboardErrLog = Join-Path $tmpLogDir "HermesGo-dashboard-verify.err.txt"
 $dashboardUrl = "http://127.0.0.1:9119/"
 $configPath = Join-Path $root "home\config.yaml"
 $ollamaModelsDir = Join-Path $root "data\ollama\models"
-$iconPath = Join-Path $root "HermesGo.ico"
+$iconPath = Join-Path $root "assets\\icons\\HermesGo.ico"
 $codexCmd = Join-Path $root "codex.cmd"
 $proxyBypassDefaults = @(
     "localhost",
@@ -237,6 +237,17 @@ try {
     if (-not $ollamaProbe.choices -or $ollamaProbe.choices.Count -lt 1) {
         throw "Bundled Ollama OpenAI-compatible probe returned no choices."
     }
+
+    # Also verify the free-first gateway bootstrap path is functional.
+    # This does NOT require any provider keys to be configured; it should still
+    # generate pool.yaml + litellm.config.yaml and print helpful hints.
+    & $pythonExe -m hermes_cli.main gateway-pool bootstrap-free --write-litellm | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "gateway-pool bootstrap-free failed with exit code $LASTEXITCODE" }
+    $poolPath = Join-Path $env:USERPROFILE ".hermes\gateway-pool\pool.yaml"
+    $litellmPath = Join-Path $env:USERPROFILE ".hermes\gateway-pool\litellm.config.yaml"
+    if (-not (Test-Path -LiteralPath $poolPath)) { throw "gateway-pool manifest missing: $poolPath" }
+    if (-not (Test-Path -LiteralPath $litellmPath)) { throw "gateway-pool litellm config missing: $litellmPath" }
+
     $ownerPath = Get-PortOwnerPath -Port 9119
     if ($ownerPath -ine $pythonExe) {
         throw "Dashboard listener is not owned by portable python.exe. Owner: $ownerPath"

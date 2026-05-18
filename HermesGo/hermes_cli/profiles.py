@@ -109,7 +109,7 @@ _HERMES_SUBCOMMANDS = frozenset({
     "chat", "model", "gateway", "setup", "whatsapp", "login", "logout",
     "status", "cron", "doctor", "dump", "config", "pairing", "skills", "tools",
     "mcp", "sessions", "insights", "version", "update", "uninstall",
-    "profile", "plugins", "honcho", "acp",
+    "profile", "plugins", "honcho", "acp", "gateway-pool", "selfext",
 })
 
 
@@ -469,6 +469,15 @@ def create_profile(
         except Exception:
             pass  # best-effort — don't fail profile creation over this
 
+    # Seed internal profile-pool metadata so the self-extension runtime can
+    # discover the profile immediately without waiting for lazy reads.
+    try:
+        from agent.profile_pool import ProfileRuntimeRecord, save_profile_runtime
+
+        save_profile_runtime(ProfileRuntimeRecord.create(profile_name=name))
+    except Exception:
+        pass
+
     return profile_dir
 
 
@@ -583,6 +592,13 @@ def delete_profile(name: str, yes: bool = False) -> Path:
         print(f"✓ Removed {profile_dir}")
     except Exception as e:
         print(f"⚠ Could not remove {profile_dir}: {e}")
+
+    try:
+        from agent.profile_pool import remove_profile_pool_state
+
+        remove_profile_pool_state(name)
+    except Exception:
+        pass
 
     # 5. Clear active_profile if it pointed to this profile
     try:
@@ -966,6 +982,13 @@ def rename_profile(old_name: str, new_name: str) -> Path:
     # 2. Rename directory
     old_dir.rename(new_dir)
     print(f"✓ Renamed {old_dir.name} → {new_dir.name}")
+
+    try:
+        from agent.profile_pool import rename_profile_pool_state
+
+        rename_profile_pool_state(old_name, new_name)
+    except Exception:
+        pass
 
     # 3. Update wrapper script
     remove_wrapper_script(old_name)

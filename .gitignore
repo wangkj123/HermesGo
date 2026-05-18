@@ -47,3 +47,12 @@ HermesGo/**/*.whl
 
 # Local builder caches
 create_hermes_go/cache/
+.build/
+create_hermes_go/.scratch/
+
+# Local test extract (synced from dist zip; not source)
+HermesGo-slim-test-v014/
+
+# Large portable runtimes (built or vendored; not git source)
+HermesGo/runtime/hermes-desktop/
+HermesGo/runtime/hermes-webui/

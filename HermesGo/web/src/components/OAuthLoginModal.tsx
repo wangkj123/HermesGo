@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Copy, X, Check, Loader2 } from "lucide-react";
 import { api, type OAuthProvider, type OAuthStartResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { useI18n } from "@/i18n";
 
 interface Props {
   provider: OAuthProvider;
+  switchAccount?: boolean;
   onClose: () => void;
   onSuccess: (msg: string) => void;
   onError: (msg: string) => void;
@@ -14,7 +15,13 @@ interface Props {
 
 type Phase = "idle" | "starting" | "awaiting_user" | "submitting" | "polling" | "approved" | "error";
 
-export function OAuthLoginModal({ provider, onClose, onSuccess, onError }: Props) {
+export function OAuthLoginModal({
+  provider,
+  switchAccount = false,
+  onClose,
+  onSuccess,
+  onError,
+}: Props) {
   const [phase, setPhase] = useState<Phase>("starting");
   const [start, setStart] = useState<OAuthStartResponse | null>(null);
   const [pkceCode, setPkceCode] = useState("");
@@ -25,20 +32,24 @@ export function OAuthLoginModal({ provider, onClose, onSuccess, onError }: Props
   const pollTimer = useRef<number | null>(null);
   const { t } = useI18n();
 
-  // Initiate flow on mount
-  useEffect(() => {
-    isMounted.current = true;
+  const beginLogin = useCallback(async () => {
+    setPhase("starting");
+    setErrorMsg(null);
+    setCodeCopied(false);
+
     api
-      .startOAuthLogin(provider.id)
+      .startOAuthLogin(provider.id, { switchAccount })
       .then((resp) => {
         if (!isMounted.current) return;
         setStart(resp);
         setSecondsLeft(resp.expires_in);
-        setPhase(resp.flow === "device_code" ? "polling" : "awaiting_user");
+        setPhase(resp.flow === "pkce" ? "awaiting_user" : "polling");
         if (resp.flow === "pkce") {
           window.open(resp.auth_url, "_blank", "noopener,noreferrer");
-        } else {
+        } else if (resp.flow === "device_code") {
           window.open(resp.verification_url, "_blank", "noopener,noreferrer");
+        } else if (resp.flow === "browser") {
+          window.open(resp.auth_url, "_blank", "noopener,noreferrer");
         }
       })
       .catch((e) => {
@@ -46,12 +57,17 @@ export function OAuthLoginModal({ provider, onClose, onSuccess, onError }: Props
         setPhase("error");
         setErrorMsg(`Failed to start login: ${e}`);
       });
+  }, [provider.id, switchAccount]);
+
+  // Initiate flow on mount
+  useEffect(() => {
+    isMounted.current = true;
+    void beginLogin();
     return () => {
       isMounted.current = false;
       if (pollTimer.current !== null) window.clearInterval(pollTimer.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [beginLogin]);
 
   // Tick the countdown
   useEffect(() => {
@@ -71,10 +87,12 @@ export function OAuthLoginModal({ provider, onClose, onSuccess, onError }: Props
     return () => window.clearInterval(tick);
   }, [secondsLeft, phase, t]);
 
-  // Device-code: poll backend every 2s
+  // Device-code and browser callback flows: poll backend until approved.
   useEffect(() => {
-    if (!start || start.flow !== "device_code" || phase !== "polling") return;
+    if (!start || phase !== "polling") return;
+    if (start.flow !== "device_code" && start.flow !== "browser") return;
     const sid = start.session_id;
+    const intervalMs = Math.max(1, start.poll_interval) * 1000;
     pollTimer.current = window.setInterval(async () => {
       try {
         const resp = await api.pollOAuthSession(provider.id, sid);
@@ -95,7 +113,7 @@ export function OAuthLoginModal({ provider, onClose, onSuccess, onError }: Props
         setErrorMsg(`Polling failed: ${e}`);
         if (pollTimer.current !== null) window.clearInterval(pollTimer.current);
       }
-    }, 2000);
+    }, intervalMs);
     return () => {
       if (pollTimer.current !== null) window.clearInterval(pollTimer.current);
     };
@@ -274,6 +292,28 @@ export function OAuthLoginModal({ provider, onClose, onSuccess, onError }: Props
             </>
           )}
 
+          {/* ── Browser callback: wait for localhost callback ─ */}
+          {start?.flow === "browser" && phase === "polling" && (
+            <>
+              <p className="text-sm text-muted-foreground">
+                {switchAccount ? t.oauth.browserSwitchHint : t.oauth.browserLoginHint}
+              </p>
+              <a
+                href={(start as Extract<OAuthStartResponse, { flow: "browser" }>).auth_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+              >
+                <ExternalLink className="h-3 w-3" />
+                {t.oauth.reOpenAuth}
+              </a>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground border-t border-border pt-3">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t.oauth.waitingAuth}
+              </div>
+            </>
+          )}
+
           {/* ── approved ───────────────────────────────────── */}
           {phase === "approved" && (
             <div className="flex items-center gap-3 py-6 text-sm text-success">
@@ -302,21 +342,7 @@ export function OAuthLoginModal({ provider, onClose, onSuccess, onError }: Props
                     setStart(null);
                     setPkceCode("");
                     setPhase("starting");
-                    api.startOAuthLogin(provider.id).then((resp) => {
-                      if (!isMounted.current) return;
-                      setStart(resp);
-                      setSecondsLeft(resp.expires_in);
-                      setPhase(resp.flow === "device_code" ? "polling" : "awaiting_user");
-                      if (resp.flow === "pkce") {
-                        window.open(resp.auth_url, "_blank", "noopener,noreferrer");
-                      } else {
-                        window.open(resp.verification_url, "_blank", "noopener,noreferrer");
-                      }
-                    }).catch((e) => {
-                      if (!isMounted.current) return;
-                      setPhase("error");
-                      setErrorMsg(`${t.common.retry} failed: ${e}`);
-                    });
+                    beginLogin();
                   }}
                 >
                   {t.common.retry}

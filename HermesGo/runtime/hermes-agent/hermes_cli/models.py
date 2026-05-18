@@ -197,6 +197,9 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "claude-haiku-4-5-20251001",
     ],
     "deepseek": [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        # Legacy aliases (still accepted by Hermes; normalized to V4)
         "deepseek-chat",
         "deepseek-reasoner",
     ],

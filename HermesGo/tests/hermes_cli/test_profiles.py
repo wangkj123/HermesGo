@@ -14,6 +14,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from agent.profile_pool import get_profile_lease_path, get_profile_runtime_path
 from hermes_cli.profiles import (
     validate_profile_name,
     get_profile_dir,
@@ -180,6 +181,15 @@ class TestCreateProfile:
         # SOUL.md is always seeded with the default even when clone source lacks it
         assert (profile_dir / "SOUL.md").exists()
 
+    def test_create_profile_seeds_profile_pool_metadata(self, profile_env):
+        create_profile("coder", no_alias=True)
+
+        runtime_path = get_profile_runtime_path("coder")
+        assert runtime_path.exists()
+        payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+        assert payload["profile_name"] == "coder"
+        assert payload["status"] == "available"
+
 
 # ===================================================================
 # TestDeleteProfile
@@ -203,6 +213,19 @@ class TestDeleteProfile:
     def test_nonexistent_raises_file_not_found(self, profile_env):
         with pytest.raises(FileNotFoundError):
             delete_profile("nonexistent", yes=True)
+
+    def test_delete_profile_removes_profile_pool_files(self, profile_env):
+        create_profile("coder", no_alias=True)
+        runtime_path = get_profile_runtime_path("coder")
+        lease_path = get_profile_lease_path("coder")
+        lease_path.parent.mkdir(parents=True, exist_ok=True)
+        lease_path.write_text(json.dumps({"profile_name": "coder", "state": "available"}), encoding="utf-8")
+
+        with patch("hermes_cli.profiles._cleanup_gateway_service"):
+            delete_profile("coder", yes=True)
+
+        assert not runtime_path.exists()
+        assert not lease_path.exists()
 
 
 # ===================================================================
@@ -402,6 +425,21 @@ class TestRenameProfile:
         create_profile("beta", no_alias=True)
         with pytest.raises(FileExistsError):
             rename_profile("alpha", "beta")
+
+    def test_rename_profile_moves_profile_pool_files(self, profile_env):
+        create_profile("oldname", no_alias=True)
+        runtime_path = get_profile_runtime_path("oldname")
+        lease_path = get_profile_lease_path("oldname")
+        lease_path.parent.mkdir(parents=True, exist_ok=True)
+        lease_path.write_text(json.dumps({"profile_name": "oldname", "state": "available"}), encoding="utf-8")
+
+        with patch("hermes_cli.profiles.check_alias_collision", return_value="skip"):
+            rename_profile("oldname", "newname")
+
+        assert not runtime_path.exists()
+        assert not lease_path.exists()
+        assert get_profile_runtime_path("newname").exists()
+        assert get_profile_lease_path("newname").exists()
 
 
 # ===================================================================

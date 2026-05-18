@@ -168,7 +168,7 @@ export const en: Translations = {
     searchPlaceholder: "Search skills and toolsets...",
     enabledOf: "{enabled}/{total} enabled",
     all: "All",
-    noSkills: "No skills found. Skills are loaded from ~/.hermes/skills/",
+    noSkills: "No skills found. Skills are loaded from HERMES_HOME/skills/",
     noSkillsMatch: "No skills match your search or filter.",
     skillCount: "{count} skill{s}",
     resultCount: "{count} result{s}",
@@ -182,7 +182,7 @@ export const en: Translations = {
   },
 
   config: {
-    configPath: "~/.hermes/config.yaml",
+    configPath: "HERMES_HOME/config.yaml",
     exportConfig: "Export config as JSON",
     importConfig: "Import config from JSON",
     resetDefaults: "Reset to defaults",
@@ -224,6 +224,10 @@ export const en: Translations = {
     llmProviders: "LLM Providers",
     providersConfigured: "{configured} of {total} providers configured",
     getKey: "Get key",
+    testProvider: "Test",
+    testProviderHint: "Test provider connectivity (uses /v1/models when available)",
+    testOkTitle: "Test OK",
+    testFailedTitle: "Test failed",
     notConfigured: "{count} not configured",
     notSet: "Not set",
     keysCount: "{count} key{s}",
@@ -231,6 +235,13 @@ export const en: Translations = {
     replaceCurrentValue: "Replace current value ({preview})",
     showValue: "Show real value",
     hideValue: "Hide value",
+    quickTitle: "Quick setup (no VPN)",
+    quickDesc: "Pick a China-accessible provider, paste your key once, HermesGo will save and test it.",
+    quickPasteKey: "Paste {provider} API key",
+    quickPlaceholder: "Paste API key here…",
+    quickNote: "This only saves the key to HERMES_HOME/.env on this machine. It is not uploaded.",
+    quickSaved: "Key saved",
+    quickFailed: "Failed to save key",
   },
 
   oauth: {

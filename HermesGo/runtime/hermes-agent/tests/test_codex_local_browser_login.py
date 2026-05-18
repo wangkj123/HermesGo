@@ -48,7 +48,7 @@ class CodexLocalBrowserLoginTests(unittest.TestCase):
                 self.assertEqual(state["tokens"]["refresh_token"], "local-refresh-token")
                 self.assertEqual(state["auth_mode"], "chatgpt-browser")
 
-    def test_auth_add_command_device_auth_forces_fresh_codex_login(self):
+    def test_auth_add_command_device_auth_uses_browser_oauth_compat_alias(self):
         fake_creds = {
             "tokens": {
                 "access_token": "fresh-access-token",
@@ -87,10 +87,58 @@ class CodexLocalBrowserLoginTests(unittest.TestCase):
         )
 
         with patch.object(auth_commands, "load_pool", return_value=FakePool()):
-            with patch.object(auth_commands.auth_mod, "_codex_cli_browser_login", return_value=fake_creds) as login:
-                auth_commands.auth_add_command(args)
+            with patch.object(auth_commands.auth_mod, "_codex_browser_oauth_login", return_value=fake_creds) as browser_login:
+                with patch.object(auth_commands.auth_mod, "_codex_device_code_login") as device_login:
+                    auth_commands.auth_add_command(args)
 
-        login.assert_called_once_with(open_browser=False, force_fresh_login=True)
+        browser_login.assert_called_once_with(open_browser=False, preferred_port=1455)
+        device_login.assert_not_called()
+
+    def test_auth_add_command_browser_login_uses_native_browser_oauth(self):
+        fake_creds = {
+            "tokens": {
+                "access_token": "browser-access-token",
+                "refresh_token": "browser-refresh-token",
+            },
+            "last_refresh": "2026-04-19T00:00:00Z",
+            "base_url": auth.DEFAULT_CODEX_BASE_URL,
+            "auth_mode": "chatgpt-browser",
+            "source": "browser",
+        }
+
+        class FakePool:
+            def __init__(self):
+                self._entries = []
+
+            def entries(self):
+                return list(self._entries)
+
+            def add_entry(self, entry):
+                self._entries.append(entry)
+
+        args = SimpleNamespace(
+            provider="openai-codex",
+            auth_type=None,
+            label=None,
+            api_key=None,
+            portal_url=None,
+            inference_url=None,
+            client_id=None,
+            scope=None,
+            device_auth=False,
+            no_browser=True,
+            timeout=None,
+            insecure=False,
+            ca_bundle=None,
+        )
+
+        with patch.object(auth_commands, "load_pool", return_value=FakePool()):
+            with patch.object(auth_commands.auth_mod, "_codex_browser_oauth_login", return_value=fake_creds) as browser_login:
+                with patch.object(auth_commands.auth_mod, "_codex_cli_browser_login") as cli_login:
+                    auth_commands.auth_add_command(args)
+
+        browser_login.assert_called_once_with(open_browser=False, preferred_port=1455)
+        cli_login.assert_not_called()
 
     def test_codex_browser_oauth_login_opens_authorize_url_and_returns_tokens(self):
         import threading
@@ -161,29 +209,18 @@ class CodexLocalBrowserLoginTests(unittest.TestCase):
         self.assertEqual(creds["source"], "oauth-browser")
         self.assertEqual(creds["auth_mode"], "chatgpt-browser")
 
-    def test_codex_cli_browser_login_falls_back_to_device_code_login_when_browser_oauth_fails(self):
+    def test_codex_cli_browser_login_does_not_fallback_to_device_auth_when_browser_oauth_fails(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             hermes_home = Path(tmp_dir) / "hermes-home"
-            fallback_creds = {
-                "tokens": {
-                    "access_token": "device-access-token",
-                    "refresh_token": "device-refresh-token",
-                },
-                "last_refresh": "2026-04-19T00:00:00Z",
-                "base_url": auth.DEFAULT_CODEX_BASE_URL,
-                "auth_mode": "chatgpt",
-                "source": "device-code",
-            }
 
             with patch.object(auth, "get_hermes_home", return_value=hermes_home):
                 with patch.object(auth, "_codex_browser_oauth_login", side_effect=auth.AuthError("oauth failed", provider="openai-codex", code="oauth_callback_timeout", relogin_required=True)) as browser_login:
-                    with patch.object(auth, "_codex_device_code_login", return_value=fallback_creds) as device_login:
-                        creds = auth._codex_cli_browser_login(open_browser=True, force_fresh_login=True)
+                    with patch.object(auth, "_codex_device_code_login") as device_login:
+                        with self.assertRaises(auth.AuthError):
+                            auth._codex_cli_browser_login(open_browser=True, force_fresh_login=True)
 
         browser_login.assert_called_once_with(open_browser=True)
-        device_login.assert_called_once_with(open_browser=True, preload_security_settings=True)
-        self.assertEqual(creds["tokens"]["access_token"], "device-access-token")
-        self.assertEqual(creds["source"], "device-code")
+        device_login.assert_not_called()
 
     def test_codex_device_code_login_prefers_browser_autofill_helper(self):
         class FakeResponse:
@@ -458,7 +495,7 @@ class CodexLocalBrowserLoginTests(unittest.TestCase):
                 self.assertIsNone(auth._import_codex_cli_tokens())
                 self.assertFalse(auth.get_codex_auth_status()["logged_in"])
 
-    def test_start_oauth_login_for_codex_uses_browser_flow_and_switch_account(self):
+    def test_start_oauth_login_for_codex_uses_browser_flow(self):
         created_threads = []
 
         class FakeThread:
@@ -474,73 +511,70 @@ class CodexLocalBrowserLoginTests(unittest.TestCase):
             def start(self):
                 self.started = True
 
-        with patch.object(web_server.threading, "Thread", FakeThread):
-            with TestClient(web_server.app) as client:
-                response = client.post(
-                    "/api/providers/oauth/openai-codex/start",
-                    headers={"Authorization": f"Bearer {web_server._SESSION_TOKEN}"},
-                    json={"switch_account": True},
-                )
+        class FakePool:
+            def __init__(self):
+                self._entries = []
+
+            def entries(self):
+                return list(self._entries)
+
+            def add_entry(self, entry):
+                self._entries.append(entry)
+
+            def remove_index(self, index):
+                if 1 <= index <= len(self._entries):
+                    return self._entries.pop(index - 1)
+                return None
+
+        fake_pool = FakePool()
+
+        fake_server = type(
+            "FakeCodexOAuthServer",
+            (),
+            {
+                "serve_forever": lambda self: None,
+                "server_port": 49876,
+            },
+        )()
+
+        with patch.object(auth, "_generate_pkce_pair", return_value=("verifier-123", "challenge-456")):
+            with patch.object(
+                auth,
+                "_create_codex_oauth_callback_server",
+                return_value=(fake_server, "http://localhost:49876/auth/callback", {"code": None, "state": None, "error": None}, object()),
+            ) as create_callback_server:
+                with patch.object(web_server.secrets, "token_urlsafe", return_value="state-123"):
+                    with patch("agent.credential_pool.load_pool", return_value=fake_pool):
+                        with patch.object(web_server.threading, "Thread", FakeThread):
+                            with TestClient(web_server.app) as client:
+                                response = client.post(
+                                    "/api/providers/oauth/openai-codex/start",
+                                    headers={"Authorization": f"Bearer {web_server._SESSION_TOKEN}"},
+                                )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["flow"], "browser")
-        self.assertTrue(payload["switch_account"])
-        self.assertTrue(created_threads)
-        self.assertIs(created_threads[0].target, web_server._codex_browser_login_worker)
-        self.assertEqual(created_threads[0].args, (payload["session_id"], True))
+        create_callback_server.assert_called_once_with(preferred_port=1455)
+        self.assertEqual(payload["auth_url"], "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A49876%2Fauth%2Fcallback&scope=openid+profile+email+offline_access+api.connectors.read+api.connectors.invoke&code_challenge=challenge-456&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state=state-123&originator=codex_vscode")
+        self.assertEqual(payload["expires_in"], 900)
+        self.assertEqual(payload["poll_interval"], 2)
+        self.assertGreaterEqual(len(created_threads), 2)
+        self.assertEqual(created_threads[0].target.__self__, fake_server)
+        self.assertIs(created_threads[1].target, web_server._codex_full_login_worker)
+        self.assertEqual(created_threads[1].args, (payload["session_id"],))
         self.assertTrue(created_threads[0].started)
+        self.assertTrue(created_threads[1].started)
 
         with web_server._oauth_sessions_lock:
             session = dict(web_server._oauth_sessions[payload["session_id"]])
         self.assertEqual(session["provider"], "openai-codex")
         self.assertEqual(session["flow"], "browser")
-        self.assertTrue(session["switch_account"])
-
-    def test_codex_browser_login_worker_clears_expected_local_state(self):
-        for switch_account in (False, True):
-            with self.subTest(switch_account=switch_account):
-                self._clear_oauth_sessions()
-                session_id, _ = web_server._new_oauth_session("openai-codex", "browser")
-                clear_calls = []
-                local_clear_calls = []
-                login_calls = []
-
-                with patch.object(
-                    auth,
-                    "clear_provider_auth",
-                    side_effect=lambda provider_id=None: clear_calls.append(provider_id) or True,
-                ):
-                    with patch.object(
-                        auth,
-                        "_clear_local_codex_auth_files",
-                        side_effect=lambda: local_clear_calls.append(True) or True,
-                    ):
-                        with patch.object(
-                            auth,
-                            "_codex_cli_browser_login",
-                            side_effect=lambda open_browser=True, **kwargs: login_calls.append((open_browser, kwargs)) or {"ok": True},
-                        ):
-                            web_server._codex_browser_login_worker(
-                                session_id,
-                                switch_account=switch_account,
-                            )
-
-                self.assertEqual(len(login_calls), 1)
-                self.assertEqual(login_calls[0][0], True)
-                self.assertIsInstance(login_calls[0][1], dict)
-                self.assertEqual(login_calls[0][1].get("force_fresh_login"), switch_account)
-                if switch_account:
-                    self.assertEqual(clear_calls, ["openai-codex"])
-                    self.assertEqual(local_clear_calls, [])
-                else:
-                    self.assertEqual(clear_calls, [])
-                    self.assertEqual(local_clear_calls, [True])
-
-                with web_server._oauth_sessions_lock:
-                    session = dict(web_server._oauth_sessions[session_id])
-                self.assertEqual(session["status"], "approved")
-                self.assertIsNone(session["error_message"])
+        self.assertEqual(session["status"], "pending")
+        self.assertEqual(session["redirect_uri"], "http://localhost:49876/auth/callback")
+        self.assertEqual(session["auth_url"], payload["auth_url"])
+        self.assertEqual(session["verifier"], "verifier-123")
+        self.assertEqual(len(fake_pool._entries), 0)
 
 
 class OAuthProviderCatalogTests(unittest.TestCase):
@@ -587,36 +621,71 @@ class OAuthProviderCatalogTests(unittest.TestCase):
 
                 return _done()
 
+        def _fake_codex_worker(session_id):
+            with web_server._oauth_sessions_lock:
+                session = web_server._oauth_sessions[session_id]
+                session["status"] = "approved"
+                session["expires_in"] = 300
+
+        fake_server = type(
+            "FakeCodexOAuthServer",
+            (),
+            {
+                "serve_forever": lambda self: None,
+                "server_port": 49876,
+            },
+        )()
+
         async def _run_device_flows():
             with patch.object(web_server.asyncio, "get_event_loop", return_value=FakeLoop()):
                 with patch.object(web_server.threading, "Thread", FakeThread):
-                    with patch.object(
-                        auth,
-                        "_request_device_code",
-                        return_value={
-                            "device_code": "device-code-123",
-                            "user_code": "ABCD-EFGH",
-                            "verification_uri_complete": "https://example.test/verify",
-                            "interval": 5,
-                            "expires_in": 900,
-                        },
-                    ):
-                        nous = await web_server._start_device_code_flow("nous", switch_account=False)
-                        codex = await web_server._start_device_code_flow("openai-codex", switch_account=True)
-            return nous, codex
+                    with patch.object(web_server, "_nous_poller", side_effect=lambda session_id: None) as mock_nous_poller:
+                        with patch.object(
+                            web_server,
+                            "_codex_full_login_worker",
+                            side_effect=_fake_codex_worker,
+                        ) as mock_codex_worker:
+                            with patch.object(
+                                auth,
+                                "_request_device_code",
+                                return_value={
+                                    "device_code": "device-code-123",
+                                    "user_code": "ABCD-EFGH",
+                                    "verification_uri_complete": "https://example.test/verify",
+                                    "interval": 5,
+                                    "expires_in": 900,
+                                },
+                            ):
+                                with patch.object(auth, "_generate_pkce_pair", return_value=("verifier-abc", "challenge-abc")):
+                                    with patch.object(
+                                        auth,
+                                        "_create_codex_oauth_callback_server",
+                                        return_value=(fake_server, "http://localhost:49876/auth/callback", {"code": None, "state": None, "error": None}, object()),
+                                    ) as create_callback_server:
+                                        with patch.object(web_server.secrets, "token_urlsafe", return_value="state-abc"):
+                                            nous = await web_server._start_device_code_flow("nous")
+                                            codex = await web_server._start_device_code_flow("openai-codex")
+                                            callback_call = create_callback_server.call_args
+            return nous, codex, mock_nous_poller, mock_codex_worker, callback_call
 
         import asyncio
 
-        nous, codex = asyncio.run(_run_device_flows())
+        nous, codex, mock_nous_poller, mock_codex_worker, callback_call = asyncio.run(_run_device_flows())
         self.assertEqual(nous["flow"], "device_code")
         self.assertEqual(nous["user_code"], "ABCD-EFGH")
         self.assertEqual(nous["verification_url"], "https://example.test/verify")
         self.assertTrue(created_threads)
-        self.assertIs(created_threads[0].target, web_server._nous_poller)
+        self.assertIs(created_threads[0].target, mock_nous_poller)
         self.assertTrue(created_threads[0].started)
 
         self.assertEqual(codex["flow"], "browser")
-        self.assertTrue(codex["switch_account"])
+        self.assertEqual(callback_call.kwargs, {"preferred_port": 1455})
+        self.assertEqual(codex["auth_url"], "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A49876%2Fauth%2Fcallback&scope=openid+profile+email+offline_access+api.connectors.read+api.connectors.invoke&code_challenge=challenge-abc&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state=state-abc&originator=codex_vscode")
+        self.assertEqual(codex["expires_in"], 900)
+        self.assertEqual(codex["poll_interval"], 2)
+        with web_server._oauth_sessions_lock:
+            codex_session = dict(web_server._oauth_sessions[codex["session_id"]])
+        self.assertEqual(codex_session["status"], "pending")
 
         self.assertEqual(
             next(entry for entry in web_server._OAUTH_PROVIDER_CATALOG if entry["id"] == "qwen-oauth")["flow"],

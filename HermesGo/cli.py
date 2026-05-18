@@ -242,7 +242,11 @@ def load_cli_config() -> Dict[str, Any]:
             "enabled": False,
             "max_simple_chars": 160,
             "max_simple_words": 28,
+            "max_medium_chars": 1200,
+            "max_medium_words": 180,
+            "gateway": {},
             "cheap_model": {},
+            "medium_model": {},
         },
         "agent": {
             "max_turns": 90,  # Default max tool-calling iterations (shared with subagents)

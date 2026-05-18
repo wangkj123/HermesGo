@@ -9,7 +9,7 @@ This page is generated from `create_hermes_go/release-state.json`.
 Use `create_hermes_go/Sync-HermesGoReleaseState.ps1` to update the package names and refresh the docs.
 
 Search keywords:
-HermesGo / HermesGo,
+HermesGo / Hermes Go,
 Hermes Agent / Hermes Agent,
 绿色版 / green package,
 U 盘版 / USB bundle,
@@ -21,6 +21,12 @@ Windows 便携 / Windows portable,
 Ollama / Ollama,
 OpenAI Codex / OpenAI Codex,
 GPT-5.4 Mini / GPT-5.4 Mini.
+
+## GitHub naming
+
+- Canonical repository/package name: `HermesGo`
+- Search aliases kept in docs and description text: `Hermes Go`, `Hermes Agent`, `green package`, `portable bundle`
+- Recommendation: keep the repo name without spaces, and put spaced phrases like `Hermes Go` in the repo description, README, and topics for GitHub discovery
 
 ## What users should download
 

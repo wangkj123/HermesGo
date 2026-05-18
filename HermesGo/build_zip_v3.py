@@ -1,7 +1,9 @@
 """Build portable ZIP from this HermesGo tree (HermesGo/ + HermesGo/app/* layout)."""
-import zipfile, os, datetime, shutil, io
+import zipfile, os, datetime, shutil, io, sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+from packaging_safe import assert_zip_has_no_reserved_entries, is_windows_reserved_name, should_skip_pack_path
 SRC = SCRIPT_DIR
 # Keep output outside SRC so os.walk does not try to read the zip being written
 OUT_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "dist")
@@ -45,7 +47,10 @@ included_size = 0
 
 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
     for root, dirs, files in os.walk(SRC):
-        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        dirs[:] = [
+            d for d in dirs
+            if d not in EXCLUDE_DIRS and not is_windows_reserved_name(d)
+        ]
         # Skip parallel repo trees under HermesGo/
         if root == SRC:
             dirs[:] = [d for d in dirs if d not in EXCLUDE_TOP_NAMES]
@@ -55,7 +60,7 @@ with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=5) as zf
             rel = os.path.relpath(src_path, SRC)
             fsize = os.path.getsize(src_path)
             
-            if fname in EXCLUDE_FILES:
+            if fname in EXCLUDE_FILES or is_windows_reserved_name(fname):
                 continue
             parent = os.path.basename(os.path.dirname(src_path))
             if parent in EXCLUDE_DIRS:
@@ -76,6 +81,9 @@ with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=5) as zf
             else:
                 arcname = f"HermesGo/{rel}"
 
+            if should_skip_pack_path(arcname):
+                continue
+
             if fname == "Start-HermesGo.ps1":
                 zf.writestr(
                     zipfile.ZipInfo(arcname, datetime.datetime.now().timetuple()[:6]),
@@ -90,6 +98,9 @@ with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=5) as zf
     # Also put a copy of the fixed PS1 in app/scripts/ for the BAT to call
     zf.writestr(zipfile.ZipInfo("HermesGo/app/scripts/Start-HermesGo.ps1",
         datetime.datetime.now().timetuple()[:6]), ps1_fixed.encode('utf-8'))
+
+with zipfile.ZipFile(zip_path, "r") as zf:
+    assert_zip_has_no_reserved_entries(zf.namelist())
 
 zip_size = os.path.getsize(zip_path)
 

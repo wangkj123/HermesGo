@@ -168,7 +168,7 @@ export const zh: Translations = {
     searchPlaceholder: "搜索技能和工具集...",
     enabledOf: "已启用 {enabled}/{total}",
     all: "全部",
-    noSkills: "未找到技能。技能从 ~/.hermes/skills/ 加载",
+    noSkills: "未找到技能。技能从 HERMES_HOME/skills/ 加载",
     noSkillsMatch: "没有匹配的技能。",
     skillCount: "{count} 个技能",
     resultCount: "{count} 个结果",
@@ -182,7 +182,7 @@ export const zh: Translations = {
   },
 
   config: {
-    configPath: "~/.hermes/config.yaml",
+    configPath: "HERMES_HOME/config.yaml",
     exportConfig: "导出配置为 JSON",
     importConfig: "从 JSON 导入配置",
     resetDefaults: "恢复默认值",
@@ -224,6 +224,10 @@ export const zh: Translations = {
     llmProviders: "LLM 提供商",
     providersConfigured: "已配置 {configured}/{total} 个提供商",
     getKey: "获取密钥",
+    testProvider: "连通性测试",
+    testProviderHint: "测试提供商连通性（可用时调用 /v1/models，尽量不消耗 token）",
+    testOkTitle: "测试成功",
+    testFailedTitle: "测试失败",
     notConfigured: "{count} 个未配置",
     notSet: "未设置",
     keysCount: "{count} 个密钥",
@@ -231,6 +235,13 @@ export const zh: Translations = {
     replaceCurrentValue: "替换当前值（{preview}）",
     showValue: "显示实际值",
     hideValue: "隐藏值",
+    quickTitle: "快速配置（免翻墙）",
+    quickDesc: "选择国内可直连的提供商，粘贴一次密钥，HermesGo 会自动保存并做连通性测试。",
+    quickPasteKey: "粘贴 {provider} API Key",
+    quickPlaceholder: "在此粘贴 API Key…",
+    quickNote: "只会把密钥保存到本机 HERMES_HOME/.env，不会上传到任何服务器。",
+    quickSaved: "密钥已保存",
+    quickFailed: "保存失败",
   },
 
   oauth: {

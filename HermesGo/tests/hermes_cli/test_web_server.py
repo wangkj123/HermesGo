@@ -206,6 +206,119 @@ class TestWebServerEndpoints:
         defaults = resp.json()
         assert "model" in defaults
 
+    def test_selfext_run_board_and_control(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+        from agent.run_registry import RunRecord, StageRecord, UnitRecord, write_run_record, write_stage_record, write_unit_record
+
+        write_run_record(
+            RunRecord(
+                run_id="web-run-001",
+                goal="让 Hermes 自展任务板支持人工介入",
+                profile_name="default",
+                status="running",
+                metadata={
+                    "kind": "self_extension",
+                    "run_type": "selfext_objective",
+                    "validation_scenario": "自有软件注册系统只作为验收样例",
+                },
+            )
+        )
+        write_stage_record(
+            StageRecord(
+                run_id="web-run-001",
+                stage_id="analyze",
+                name="analyze",
+                status="running",
+                metadata={"owner": "architect"},
+            )
+        )
+        write_unit_record(
+            UnitRecord(
+                run_id="web-run-001",
+                stage_id="analyze",
+                unit_id="u1",
+                name="split-task",
+                status="checkpointed",
+            )
+        )
+
+        resp = self.client.get("/api/selfext/runs")
+        assert resp.status_code == 200
+        assert resp.json()["runs"][0]["run"]["run_id"] == "web-run-001"
+
+        pause = self.client.post(
+            "/api/selfext/runs/web-run-001/control",
+            json={"action": "pause", "note": "人工暂停"},
+        )
+        assert pause.status_code == 200
+        assert pause.json()["run"]["status"] == "paused"
+
+        intervention = self.client.post(
+            "/api/selfext/runs/web-run-001/control",
+            json={"action": "intervene", "note": "业务场景只作为验收，不作为 SelfExt 本体"},
+        )
+        assert intervention.status_code == 200
+        assert intervention.json()["run"]["metadata"]["interventions"][0]["message"] == "业务场景只作为验收，不作为 SelfExt 本体"
+
+    def test_selfext_start_keeps_validation_scenario_separate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+
+        resp = self.client.post(
+            "/api/selfext/run/start",
+            json={
+                "run_id": "web-selfext-objective-001",
+                "goal": "让 Hermes 自展控制台支持子代理状态控制",
+                "validation_scenario": "自有软件注册系统只作为验收样例",
+                "route_tier": "local",
+                "gateway_model_name": "local",
+            },
+        )
+
+        assert resp.status_code == 200
+
+        from agent.run_registry import load_run_record
+
+        run = load_run_record("web-selfext-objective-001")
+        assert run is not None
+        assert run.goal == "让 Hermes 自展控制台支持子代理状态控制"
+        assert run.metadata["run_type"] == "selfext_objective"
+        assert run.metadata["selfext_scope"] == "hermes_self_improvement"
+        assert run.metadata["validation_scenario"] == "自有软件注册系统只作为验收样例"
+        assert run.metadata["user_task_handling"] == "validation_scenario_only"
+
+    def test_selfext_start_rejects_pure_business_goal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+
+        resp = self.client.post(
+            "/api/selfext/run/start",
+            json={
+                "goal": "设计自有软件注册系统",
+                "route_tier": "local",
+                "gateway_model_name": "local",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "self-extension" in resp.json()["detail"]
+
+    def test_selfext_prompt_marks_business_input_as_validation_only(self):
+        resp = self.client.post(
+            "/api/selfext/prompt",
+            json={
+                "task_summary": "让 Hermes 自展控制台支持子代理状态控制",
+                "validation_scenario": "自有软件注册系统只作为验收样例",
+                "clarification_first": True,
+                "own_software_only": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        prompt = resp.json()["prompt"]
+        assert "Hermes 自展目标，不是普通业务任务" in prompt
+        assert "不要把用户的外部业务需求当成 SelfExt 本体" in prompt
+        assert "验收场景：自有软件注册系统只作为验收样例" in prompt
+        assert "不是 SelfExt 要交付的业务本体" in prompt
+
     def test_get_env_vars(self):
         resp = self.client.get("/api/env")
         assert resp.status_code == 200
@@ -306,6 +419,89 @@ class TestWebServerEndpoints:
         assert resp.status_code in (200, 404)
         if resp.status_code == 200:
             assert "FastAPI" not in resp.text  # Should not serve the actual source
+
+    def test_openai_codex_start_uses_browser_flow(self, monkeypatch):
+        import threading
+        import hermes_cli.web_server as web_server
+
+        fake_server = type(
+            "FakeCodexBrowserServer",
+            (),
+            {
+                "login_event": threading.Event(),
+                "login_result": {"status": "pending"},
+                "serve_forever": lambda self: None,
+            },
+        )()
+        captured = {}
+
+        monkeypatch.setattr(
+            "hermes_cli.auth._generate_codex_pkce",
+            lambda: ("verifier-123", "challenge-456"),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.auth._build_codex_browser_auth_url",
+            lambda challenge, state, redirect_uri=None: f"https://auth.example/{challenge}/{state}",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.auth._start_codex_browser_login_server",
+            lambda state: fake_server,
+        )
+        monkeypatch.setattr(web_server.secrets, "token_urlsafe", lambda n: "state-123")
+
+        class _FakeThread:
+            def __init__(self, target=None, args=(), daemon=None, name=None):
+                captured["target"] = target
+                captured["args"] = args
+                captured["daemon"] = daemon
+                captured["name"] = name
+
+            def start(self):
+                captured["started"] = True
+
+        monkeypatch.setattr(web_server.threading, "Thread", _FakeThread)
+
+        resp = self.client.post("/api/providers/oauth/openai-codex/start")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["flow"] == "browser"
+        assert data["auth_url"] == "https://auth.example/challenge-456/state-123"
+        assert data["poll_interval"] == 2
+        assert data["session_id"]
+        assert captured["target"] is web_server._codex_full_login_worker
+        assert captured["args"] == (data["session_id"],)
+        assert captured["started"] is True
+
+        with web_server._oauth_sessions_lock:
+            sess = web_server._oauth_sessions[data["session_id"]]
+        assert sess["flow"] == "browser"
+        assert sess["auth_url"] == data["auth_url"]
+        assert sess["verifier"] == "verifier-123"
+        assert sess["browser_server"] is fake_server
+
+    def test_codex_browser_login_falls_back_when_1455_is_busy(self, monkeypatch):
+        import hermes_cli.auth as auth
+
+        attempts = []
+
+        class _FakeServer:
+            def __init__(self, address, handler):
+                attempts.append((address[0], address[1]))
+                if address[1] == 1455:
+                    raise OSError("address already in use")
+                self.server_port = 49876
+                self.redirect_uri = f"http://localhost:{self.server_port}/auth/callback"
+
+        monkeypatch.setattr(auth, "_CodexBrowserLoginServer", _FakeServer)
+        monkeypatch.setattr(auth, "_CodexBrowserLoginServerV4", _FakeServer)
+
+        server = auth._start_codex_browser_login_server("state-abc")
+
+        assert server.server_port == 49876
+        assert server.redirect_uri == "http://localhost:49876/auth/callback"
+        assert any(port == 1455 for _, port in attempts)
+        assert any(port == 0 for _, port in attempts)
 
 
 # ---------------------------------------------------------------------------

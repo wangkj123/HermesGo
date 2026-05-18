@@ -10,6 +10,12 @@ import { useI18n } from "@/i18n";
 interface Props {
   onError?: (msg: string) => void;
   onSuccess?: (msg: string) => void;
+  autoOpenProviderId?: string | null;
+}
+
+interface LoginRequest {
+  provider: OAuthProvider;
+  switchAccount: boolean;
 }
 
 function formatExpiresAt(expiresAt: string | null | undefined, expiresInTemplate: string): string | null {
@@ -31,12 +37,13 @@ function formatExpiresAt(expiresAt: string | null | undefined, expiresInTemplate
   }
 }
 
-export function OAuthProvidersCard({ onError, onSuccess }: Props) {
+export function OAuthProvidersCard({ onError, onSuccess, autoOpenProviderId }: Props) {
   const [providers, setProviders] = useState<OAuthProvider[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [loginFor, setLoginFor] = useState<OAuthProvider | null>(null);
+  const [loginFor, setLoginFor] = useState<LoginRequest | null>(null);
+  const autoOpenedRef = useRef<string | null>(null);
   const { t } = useI18n();
 
   const onErrorRef = useRef(onError);
@@ -54,6 +61,15 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!providers || !autoOpenProviderId) return;
+    if (autoOpenedRef.current === autoOpenProviderId) return;
+    const provider = providers.find((p) => p.id === autoOpenProviderId);
+    if (!provider || provider.status.logged_in) return;
+    autoOpenedRef.current = autoOpenProviderId;
+    setLoginFor({ provider, switchAccount: false });
+  }, [providers, autoOpenProviderId]);
 
   const handleCopy = async (provider: OAuthProvider) => {
     try {
@@ -203,11 +219,22 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                     <Button
                       variant="default"
                       size="sm"
-                      onClick={() => setLoginFor(p)}
+                      onClick={() => setLoginFor({ provider: p, switchAccount: false })}
                       className="text-xs h-7"
                     >
                       <LogIn className="h-3 w-3 mr-1" />
                       {t.oauth.login}
+                    </Button>
+                  )}
+                  {p.status.logged_in && p.id === "openai-codex" && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setLoginFor({ provider: p, switchAccount: true })}
+                      className="text-xs h-7"
+                    >
+                      <RefreshCw className="h-3 w-3 mr-1" />
+                      {t.oauth.switchAccount}
                     </Button>
                   )}
                   {!p.status.logged_in && (
@@ -258,7 +285,8 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
       </CardContent>
       {loginFor && (
         <OAuthLoginModal
-          provider={loginFor}
+          provider={loginFor.provider}
+          switchAccount={loginFor.switchAccount}
           onClose={() => {
             setLoginFor(null);
             refresh();

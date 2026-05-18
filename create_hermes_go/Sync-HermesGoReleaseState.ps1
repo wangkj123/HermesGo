@@ -103,9 +103,11 @@ Do not edit the release directory directly. Use the isolated test workspace inst
 
 ## Release behavior
 
-The shipped `HermesGo` package is a green / USB-friendly / one-click install bundle with a built-in local model runtime. It is intended to run without installing a separate Python runtime or Ollama bundle. `HermesGo.exe` opens a classic launcher for beginners, now with a selectable action box for one-click start, GPT-5.4 mini, Dashboard, and utility actions, while the Dashboard remains available for advanced users. The launcher remembers your last selected item, keeps that item at the top on the next start, and can load custom actions from `home/launcher-actions.txt`. The packaged `HermesGo.exe` has a custom horse-head icon.
+The shipped `HermesGo` package is a green / USB-friendly / one-click install bundle with a built-in local model runtime. It is intended to run without installing a separate Python runtime or Ollama bundle. `HermesGo.exe` opens a classic launcher with maintenance tools at the top, a visible `UI 套件共 8 项（00 原版 + 01-07）` section below it, and custom non-startup actions from `home/launcher-actions.txt`. All config, logs, and runtime state live under the packaged green directory. The packaged `HermesGo.exe` has a custom horse-head icon.
 
-For OpenAI Codex, this release does not rely on an external Codex CLI installation. Local 2B startup never triggers ChatGPT / Codex sign-in. Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing.
+The packaged UI suite selector is included again in this release line. The shipped bundle now includes the extra candidate launchers and the `ui-suite/` directory again.
+
+For OpenAI Codex, this release does not rely on an external Codex CLI installation. Local 2B startup never triggers ChatGPT / Codex sign-in. Cloud models from the inline startup area use the bundled login flow when Codex auth is missing.
 
 The downloadable zip keeps the top-level `HermesGo/` folder intact so the package can be extracted directly. Older release versions stay published on GitHub Releases and are not deleted when a new release is added.
 '@
@@ -157,14 +159,15 @@ GPT-5.4 Mini / GPT-5.4 Mini.
 - This repository keeps the old releases intact and adds a new searchable green-package line.
 - If you only see __PREVIOUS_RELEASE_PATTERN__, that is the older archive and not the current package.
 
-The full package is about 1.6 GB and includes everything needed to run directly:
+The full package includes everything needed to run directly:
 
 - Hermes Agent runtime
 - Dashboard
 - Portable Python
 - Portable Ollama runtime
 - Default Ollama 2B model store
-- `HermesGo.exe` with a horse-head icon, a classic beginner launcher, and a selectable action box for fast switching
+- The packaged UI suite selector is included again in the shipped bundle; the repository keeps the archive rationale separately
+- `HermesGo.exe` with a horse-head icon, a maintenance selector, and a visible UI suite section
 - Bundled `codex.cmd` compatibility launcher for the release package, not an external Codex CLI dependency
 - `tutorial/` with numbered screenshots and usage notes for new users
 
@@ -172,18 +175,19 @@ The full package is about 1.6 GB and includes everything needed to run directly:
 
 1. Download the full zip. It keeps the top-level `HermesGo/` directory.
 2. Extract the whole `HermesGo/` directory. Do not copy only `HermesGo.exe`.
-3. Double-click `HermesGo.exe`. It opens the classic launcher with a selectable action box for beginner start, OpenAI GPT-5.4 mini, Dashboard / Config, and utility actions for model switching, self-check, logs, config folders, and custom launcher actions from `home/launcher-actions.txt`.
+3. Double-click `HermesGo.exe`. It opens the classic launcher with maintenance tools for model switching, self-check, logs, config folders, and custom non-startup actions from `home/launcher-actions.txt`; the visible `UI 套件共 8 项（00 原版 + 01-07）` section below it keeps the packaged UI choices together.
 4. If you prefer the direct entry, double-click `HermesGo.bat`.
 5. For a quick self-check, run `Verify-HermesGo.bat`.
 6. To switch the default local model, run `Switch-HermesGoModel.bat`.
-7. Local 2B startup does not trigger ChatGPT / Codex sign-in. Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing.
+7. Local 2B startup does not trigger ChatGPT / Codex sign-in. Cloud models selected in the inline startup area use the bundled login flow when Codex auth is missing.
 8. If you are learning the package, open `tutorial/README.md` first and follow the numbered screenshots.
+9. The packaged UI suite selector is included again in this release line as the visible `UI 套件共 8 项（00 原版 + 01-07）` section. Historical notes remain in the repository archive docs.
 
 ## Directory map
 
 | Path | Purpose |
 |---|---|
-| `HermesGo.exe` | Classic launcher entrypoint with beginner, cloud, advanced, utility, and custom choices |
+| `HermesGo.exe` | Classic launcher entrypoint with maintenance tools and a visible UI suite section |
 | `HermesGo.bat` | Direct entrypoint for the full runtime |
 | `Start-HermesGo.ps1` | Main launcher that starts runtime, Dashboard, and chat |
 | `Verify-HermesGo.bat` / `Verify-HermesGo.ps1` | Structure and runtime verification |
@@ -196,7 +200,7 @@ The full package is about 1.6 GB and includes everything needed to run directly:
 | `data/ollama/models/` | Offline model files and manifests |
 | `tutorial/` | Numbered usage screenshots and notes for new users |
 | `logs/` | Temporary logs |
-| `HermesGo-debug.txt` | Root debug log, refreshed on each launch |
+| `logs/update/HermesGo-bootstrap.log` | Launcher debug log, refreshed on each launch |
 | `installers/` | Optional installer drop-in directory, not required for runtime |
 
 ## How I tested it
@@ -210,12 +214,15 @@ I did not keep editing the published output directly. I used an isolated test wo
 
 What the verification checks:
 
-- The launcher remembers the last selected item, loads custom actions from `home/launcher-actions.txt`, and covers both the selectable action box and the legacy button cards for local start, GPT-5.4 mini, and Dashboard
-- Cloud / GPT-5.4 mini checks Codex login state before launch and opens the browser login page only when credentials are missing
+- The launcher loads custom non-startup actions from `home/launcher-actions.txt` and keeps the visible UI suite section under the maintenance selector
+- The packaged UI suite selector is included again in this release line as the visible `UI 套件共 8 项（00 原版 + 01-07）` section
+- The update flow shows progress while it downloads and applies an update, then shows a summary box with the files and folders it changed
+- Cloud model startup checks Codex login state before launch and opens the browser login page only when credentials are missing
 - `HermesGo.bat` / `Start-HermesGo.ps1` still start the Dashboard flow
 - The bundled Ollama 2B model store is available
 - The portable Python runtime is still the bundled one
-- Launch logs are written to `HermesGo-debug.txt`
+- Launch logs are written to `logs/update/HermesGo-bootstrap.log`
+- The archive docs keep the historical notes for the UI suite selector
 - Release packaging excludes local `auth.json` / `auth.lock` credentials from the ship-ready bundle
 
 If you want to keep iterating, do it in the sandbox first and only return to the published package after the sandbox passes.
@@ -303,7 +310,7 @@ HermesGo / HermesGo, Hermes Agent / Hermes Agent, 绿色版 / green package, U �
 ## Highlights
 - Green / USB-friendly / one-click install bundle with a built-in local model runtime
 - Local 2B startup does not trigger ChatGPT / Codex sign-in
-- Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing
+- Cloud models selected in the inline startup area use the bundled login flow when Codex auth is missing
 - OpenAI Codex login is implemented inside Hermes; it does not depend on an external Codex CLI installation
 - The bundle excludes local `auth.json` / `auth.lock` credentials
 - Source and release notes are published together

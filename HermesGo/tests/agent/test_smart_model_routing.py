@@ -59,3 +59,57 @@ def test_resolve_turn_route_falls_back_to_primary_when_route_runtime_cannot_be_r
     assert result["model"] == "anthropic/claude-sonnet-4"
     assert result["runtime"]["provider"] == "openrouter"
     assert result["label"] is None
+
+
+def test_routes_medium_prompt_when_medium_model_configured():
+    from agent.smart_model_routing import choose_medium_model_route
+
+    cfg = {
+        "enabled": True,
+        "medium_model": {
+            "provider": "custom",
+            "model": "litellm-medium",
+            "base_url": "http://127.0.0.1:4000/v1",
+        },
+    }
+    result = choose_medium_model_route("帮我整理一下这个需求，列出三段摘要和一个行动清单。", cfg)
+    assert result is not None
+    assert result["provider"] == "custom"
+    assert result["model"] == "litellm-medium"
+    assert result["routing_reason"] == "medium_turn"
+
+
+def test_medium_route_inherits_gateway_defaults():
+    from agent.smart_model_routing import choose_medium_model_route
+
+    cfg = {
+        "enabled": True,
+        "gateway": {
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:4000/v1",
+            "api_key_env": "LITELLM_API_KEY",
+        },
+        "medium_model": {
+            "model": "litellm-medium",
+        },
+    }
+    result = choose_medium_model_route("请整理这份会议纪要，拆成目标、风险和下一步。", cfg)
+    assert result is not None
+    assert result["provider"] == "custom"
+    assert result["base_url"] == "http://127.0.0.1:4000/v1"
+    assert result["api_key_env"] == "LITELLM_API_KEY"
+
+
+def test_medium_route_skips_complex_prompt():
+    from agent.smart_model_routing import choose_medium_model_route
+
+    cfg = {
+        "enabled": True,
+        "medium_model": {
+            "provider": "custom",
+            "model": "litellm-medium",
+            "base_url": "http://127.0.0.1:4000/v1",
+        },
+    }
+    prompt = "debug this traceback and implement a patch for the failing docker build"
+    assert choose_medium_model_route(prompt, cfg) is None

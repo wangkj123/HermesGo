@@ -26,6 +26,6 @@ if not exist "%WEBUI%\run.py" (
 )
 echo Starting Hermes WebUI on http://127.0.0.1:8787 ...
 start "Hermes WebUI" /MIN "%PYTHON%" "%WEBUI%\run.py"
-timeout /t 3 /nobreak >nul
+timeout /t 3 /nobreak >"%SystemRoot%\System32\NUL"
 start http://127.0.0.1:8787
 exit /b 0

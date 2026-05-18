@@ -3,10 +3,11 @@ import { Routes, Route, NavLink, Navigate } from "react-router-dom";
 import {
   Activity, BarChart3, Clock, FileText, KeyRound,
   MessageSquare, Package, Settings, Puzzle,
-  Sparkles, Terminal, Globe, Database, Shield,
+  Sparkles, Globe, Database, Shield,
   Wrench, Zap, Heart, Star, Code, Eye,
 } from "lucide-react";
 import StatusPage from "@/pages/StatusPage";
+import ChatPage from "@/pages/ChatPage";
 import ConfigPage from "@/pages/ConfigPage";
 import EnvPage from "@/pages/EnvPage";
 import SessionsPage from "@/pages/SessionsPage";
@@ -33,6 +34,7 @@ interface NavItem {
 
 const BUILTIN_NAV: NavItem[] = [
   { path: "/", labelKey: "status", label: "Status", icon: Activity },
+  { path: "/chat", labelKey: "chat", label: "Chat", icon: Sparkles },
   { path: "/sessions", labelKey: "sessions", label: "Sessions", icon: MessageSquare },
   { path: "/analytics", labelKey: "analytics", label: "Analytics", icon: BarChart3 },
   { path: "/logs", labelKey: "logs", label: "Logs", icon: FileText },
@@ -50,7 +52,7 @@ const BUILTIN_NAV: NavItem[] = [
 const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   Activity, BarChart3, Clock, FileText, KeyRound,
   MessageSquare, Package, Settings, Puzzle,
-  Sparkles, Terminal, Globe, Database, Shield,
+  Sparkles, Globe, Database, Shield,
   Wrench, Zap, Heart, Star, Code, Eye,
 };
 
@@ -158,6 +160,7 @@ export default function App() {
       <main className="relative z-2 mx-auto w-full max-w-[1400px] flex-1 px-3 sm:px-6 pt-16 sm:pt-20 pb-4 sm:pb-8">
         <Routes>
           <Route path="/" element={<StatusPage />} />
+          <Route path="/chat" element={<ChatPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
           <Route path="/logs" element={<LogsPage />} />

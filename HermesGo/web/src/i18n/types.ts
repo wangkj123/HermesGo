@@ -234,6 +234,10 @@ export interface Translations {
     llmProviders: string;
     providersConfigured: string;
     getKey: string;
+    testProvider: string;
+    testProviderHint: string;
+    testOkTitle: string;
+    testFailedTitle: string;
     notConfigured: string;
     notSet: string;
     keysCount: string;
@@ -241,6 +245,13 @@ export interface Translations {
     replaceCurrentValue: string;
     showValue: string;
     hideValue: string;
+    quickTitle: string;
+    quickDesc: string;
+    quickPasteKey: string;
+    quickPlaceholder: string;
+    quickNote: string;
+    quickSaved: string;
+    quickFailed: string;
   };
 
   // ── OAuth ──
@@ -254,6 +265,7 @@ export interface Translations {
     runInTerminal: string;
     noProviders: string;
     login: string;
+    switchAccount: string;
     disconnect: string;
     managedExternally: string;
     copied: string;
@@ -272,12 +284,15 @@ export interface Translations {
     pasteCode: string;
     waitingAuth: string;
     enterCodePrompt: string;
+    browserLoginHint: string;
+    browserSwitchHint: string;
     pkceStep1: string;
     pkceStep2: string;
     pkceStep3: string;
     flowLabels: {
       pkce: string;
       device_code: string;
+      browser: string;
       external: string;
     };
     expiresIn: string;

@@ -175,6 +175,10 @@ QWEN_OAUTH_CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56"
 QWEN_OAUTH_TOKEN_URL = "https://chat.qwen.ai/api/v1/oauth2/token"
 QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 
+# Google Gemini OAuth (google-gemini-cli provider, Cloud Code Assist backend)
+DEFAULT_GEMINI_CLOUDCODE_BASE_URL = "cloudcode-pa://google"
+GEMINI_OAUTH_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60  # refresh 60s before expiry
+
 
 # =============================================================================
 # Provider Registry
@@ -218,6 +222,12 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         name="Qwen OAuth",
         auth_type="oauth_external",
         inference_base_url=DEFAULT_QWEN_BASE_URL,
+    ),
+    "google-gemini-cli": ProviderConfig(
+        id="google-gemini-cli",
+        name="Google Gemini (OAuth)",
+        auth_type="oauth_external",
+        inference_base_url=DEFAULT_GEMINI_CLOUDCODE_BASE_URL,
     ),
     "copilot": ProviderConfig(
         id="copilot",
@@ -1064,7 +1074,7 @@ def resolve_provider(
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
         "aigateway": "ai-gateway", "vercel": "ai-gateway", "vercel-ai-gateway": "ai-gateway",
         "opencode": "opencode-zen", "zen": "opencode-zen",
-        "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth",
+        "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
         "mimo": "xiaomi", "xiaomi-mimo": "xiaomi",
         "aws": "bedrock", "aws-bedrock": "bedrock", "amazon-bedrock": "bedrock", "amazon": "bedrock",
@@ -1373,6 +1383,82 @@ def get_qwen_auth_status() -> Dict[str, Any]:
             "auth_file": str(auth_path),
             "error": str(exc),
         }
+
+
+# =============================================================================
+# Google Gemini OAuth (google-gemini-cli) — PKCE flow + Cloud Code Assist.
+#
+# Tokens live in ~/.hermes/auth/google_oauth.json (managed by agent.google_oauth).
+# The `base_url` here is the marker "cloudcode-pa://google" that run_agent.py
+# uses to construct a GeminiCloudCodeClient instead of the default OpenAI SDK.
+# Actual HTTP traffic goes to https://cloudcode-pa.googleapis.com/v1internal:*.
+# =============================================================================
+
+def resolve_gemini_oauth_runtime_credentials(
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Resolve runtime OAuth creds for google-gemini-cli."""
+    try:
+        from agent.google_oauth import (
+            GoogleOAuthError,
+            _credentials_path,
+            get_valid_access_token,
+            load_credentials,
+        )
+    except ImportError as exc:
+        raise AuthError(
+            f"agent.google_oauth is not importable: {exc}",
+            provider="google-gemini-cli",
+            code="google_oauth_module_missing",
+        ) from exc
+
+    try:
+        access_token = get_valid_access_token(force_refresh=force_refresh)
+    except GoogleOAuthError as exc:
+        raise AuthError(
+            str(exc),
+            provider="google-gemini-cli",
+            code=exc.code,
+        ) from exc
+
+    creds = load_credentials()
+    base_url = DEFAULT_GEMINI_CLOUDCODE_BASE_URL
+    return {
+        "provider": "google-gemini-cli",
+        "base_url": base_url,
+        "api_key": access_token,
+        "source": "google-oauth",
+        "expires_at_ms": (creds.expires_ms if creds else None),
+        "auth_file": str(_credentials_path()),
+        "email": (creds.email if creds else "") or "",
+        "project_id": (creds.project_id if creds else "") or "",
+    }
+
+
+def get_gemini_oauth_auth_status() -> Dict[str, Any]:
+    """Return a status dict for `hermes auth list` / `hermes status`."""
+    try:
+        from agent.google_oauth import _credentials_path, load_credentials
+    except ImportError:
+        return {"logged_in": False, "error": "agent.google_oauth unavailable"}
+    auth_path = _credentials_path()
+    creds = load_credentials()
+    if creds is None or not creds.access_token:
+        return {
+            "logged_in": False,
+            "auth_file": str(auth_path),
+            "error": "not logged in",
+        }
+    return {
+        "logged_in": True,
+        "auth_file": str(auth_path),
+        "source": "google-oauth",
+        "api_key": creds.access_token,
+        "expires_at_ms": creds.expires_ms,
+        "email": creds.email,
+        "project_id": creds.project_id,
+    }
 
 
 # =============================================================================
@@ -1740,11 +1826,21 @@ def _wait_for_codex_oauth_callback(*, expected_state: str, server: HTTPServer, w
     return result["code"]
 
 
-def _codex_browser_oauth_login(*, open_browser: bool = True) -> Dict[str, Any]:
+def _codex_browser_oauth_login(
+    *,
+    open_browser: bool = True,
+    preferred_port: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Run the OpenAI Codex browser OAuth flow and return credentials dict.
+
+    ``preferred_port`` controls the local callback listener port.  When set to
+    0 the server binds an ephemeral loopback port, which is useful for UIs that
+    want to avoid a fixed 1455 listener.
+    """
     verifier, challenge = _generate_pkce_pair()
     state = base64.urlsafe_b64encode(os.urandom(24)).rstrip(b"=").decode("ascii")
-    preferred_port = _get_codex_oauth_redirect_port()
-    server, redirect_uri, result, done = _create_codex_oauth_callback_server(preferred_port=preferred_port)
+    port = _get_codex_oauth_redirect_port() if preferred_port is None else preferred_port
+    server, redirect_uri, result, done = _create_codex_oauth_callback_server(preferred_port=port)
     worker = threading.Thread(target=server.serve_forever, daemon=True, name="codex-oauth-callback")
     worker.start()
     params = {
@@ -1964,21 +2060,7 @@ def _codex_cli_browser_login(*, open_browser: bool = True, force_fresh_login: bo
             )
             return existing
 
-    try:
-        creds = _codex_browser_oauth_login(open_browser=open_browser)
-    except AuthError as exc:
-        logger.warning(
-            "OpenAI Codex browser OAuth failed; falling back to device auth: %s",
-            exc,
-        )
-        try:
-            _close_previous_browser_tab(search_terms=("OpenAI", "ChatGPT", "Codex", "HermesGo"))
-        except Exception:
-            pass
-        creds = _codex_device_code_login(
-            open_browser=open_browser,
-            preload_security_settings=True,
-        )
+    creds = _codex_browser_oauth_login(open_browser=open_browser)
     _save_codex_tokens(
         creds["tokens"],
         creds.get("last_refresh"),
@@ -2256,7 +2338,7 @@ def resolve_codex_runtime_credentials(
         "api_key": access_token,
         "source": "hermes-auth-store",
         "last_refresh": data.get("last_refresh"),
-        "auth_mode": "chatgpt",
+        "auth_mode": str(data.get("auth_mode") or "chatgpt"),
     }
 
 
@@ -3054,7 +3136,7 @@ def get_codex_auth_status() -> Dict[str, Any]:
                         "auth_store": str(_auth_file_path()),
                         "source_label": _display_local_codex_auth_path(),
                         "last_refresh": getattr(entry, "last_refresh", None),
-                        "auth_mode": "chatgpt",
+                        "auth_mode": str(getattr(entry, "auth_mode", None) or "chatgpt"),
                         "source": f"pool:{getattr(entry, 'label', 'unknown')}",
                         "api_key": api_key,
                     }
@@ -3151,6 +3233,8 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_codex_auth_status()
     if target == "qwen-oauth":
         return get_qwen_auth_status()
+    if target == "google-gemini-cli":
+        return get_gemini_oauth_auth_status()
     if target == "copilot-acp":
         return get_external_process_provider_status(target)
     # API-key providers

@@ -9,7 +9,7 @@ This page is generated from `create_hermes_go/release-state.json`.
 Use `create_hermes_go/Sync-HermesGoReleaseState.ps1` to update the package names and refresh the docs.
 
 Search keywords:
-HermesGo / HermesGo,
+HermesGo / Hermes Go,
 Hermes Agent / Hermes Agent,
 绿色版 / green package,
 U 盘版 / USB bundle,
@@ -21,6 +21,12 @@ Windows 便携 / Windows portable,
 Ollama / Ollama,
 OpenAI Codex / OpenAI Codex,
 GPT-5.4 Mini / GPT-5.4 Mini.
+
+## GitHub naming
+
+- Canonical repository/package name: `HermesGo`
+- Search aliases kept in docs and release copy: `Hermes Go`, `Hermes Agent`, `green package`, `portable bundle`
+- Recommendation: keep the package/repository name without spaces, and put spaced phrases like `Hermes Go` in the repo description, README, and topics for GitHub discovery
 
 ## Download
 
@@ -51,6 +57,16 @@ The full package is about 1.6 GB and includes everything needed to run directly:
 6. To switch the default local model, run `Switch-HermesGoModel.bat`.
 7. Local 2B startup does not trigger ChatGPT / Codex sign-in. Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing.
 8. If you are learning the package, open `tutorial/README.md` first and follow the numbered screenshots.
+
+### No-VPN quick cloud trial (beginner-friendly)
+
+Open the Dashboard → `Keys` page (`/env`). You can use the **Quick setup (no VPN)** card:
+
+- Pick a China-accessible provider (e.g. DeepSeek / GLM(Z.AI) / Kimi China / MiniMax China / DashScope)
+- Paste your API key once
+- HermesGo saves it to `HERMES_HOME/.env` and runs a lightweight connectivity test
+
+DeepSeek V4 models are supported: `deepseek-v4-flash` and `deepseek-v4-pro` (legacy aliases are auto-normalized).
 
 ## Directory map
 

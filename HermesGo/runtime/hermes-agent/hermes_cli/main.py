@@ -11,6 +11,9 @@ Usage:
     hermes gateway status      # Show gateway status
     hermes gateway install     # Install gateway service
     hermes gateway uninstall   # Uninstall gateway service
+    hermes gateway-pool show   # Show unified gateway manifest
+    hermes gateway-pool write-litellm  # Render LiteLLM config
+    hermes gateway-pool bootstrap-free # Build free-first pool from existing keys
     hermes setup               # Interactive setup wizard
     hermes logout              # Clear stored authentication
     hermes status              # Show status of all components
@@ -38,6 +41,7 @@ Usage:
     hermes update              Update to latest version
     hermes uninstall           Uninstall Hermes Agent
     hermes acp                 Run as an ACP server for editor integration
+    hermes selfext start ...   Start a self-extension run
     hermes sessions browse     Interactive session picker with search
 
     hermes claw migrate --dry-run  # Preview migration without changes
@@ -47,7 +51,6 @@ import argparse
 import os
 import subprocess
 import sys
-import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -199,8 +202,8 @@ def _has_any_provider_configured() -> bool:
 
     # Determine whether Hermes itself has been explicitly configured (model
     # in config that isn't the hardcoded default). Used below to gate external
-    # tool credentials that shouldn't silently skip the setup wizard on a
-    # fresh install.
+    # tool credentials (Claude Code, Codex CLI) that shouldn't silently skip
+    # the setup wizard on a fresh install.
     from hermes_cli.config import DEFAULT_CONFIG
     _DEFAULT_MODEL = DEFAULT_CONFIG.get("model", "")
     cfg = load_config()
@@ -1142,7 +1145,7 @@ def select_provider_and_model(args=None):
         _model_flow_kimi(config, current_model)
     elif selected_provider == "bedrock":
         _model_flow_bedrock(config, current_model)
-    elif selected_provider in ("gemini", "deepseek", "xai", "zai", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface", "xiaomi", "arcee"):
+    elif selected_provider in ("gemini", "deepseek", "xai", "zai", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface", "xiaomi", "arcee", "ollama-cloud"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
     # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
@@ -1278,11 +1281,8 @@ def _model_flow_nous(config, current_model="", args=None):
         AuthError, format_auth_error,
         _login_nous, PROVIDER_REGISTRY,
     )
-    from hermes_cli.config import get_env_value, save_config, save_env_value
-    from hermes_cli.nous_subscription import (
-        apply_nous_provider_defaults,
-        get_nous_subscription_explainer_lines,
-    )
+    from hermes_cli.config import get_env_value, load_config, save_config, save_env_value
+    from hermes_cli.nous_subscription import prompt_enable_tool_gateway
     import argparse
 
     state = get_provider_auth_state("nous")
@@ -1301,9 +1301,12 @@ def _model_flow_nous(config, current_model="", args=None):
                 insecure=bool(getattr(args, "insecure", False)),
             )
             _login_nous(mock_args, PROVIDER_REGISTRY["nous"])
-            print()
-            for line in get_nous_subscription_explainer_lines():
-                print(line)
+            # Offer Tool Gateway enablement for paid subscribers
+            try:
+                _refreshed = load_config() or {}
+                prompt_enable_tool_gateway(_refreshed)
+            except Exception:
+                pass
         except SystemExit:
             print("Login cancelled or failed.")
             return
@@ -1411,18 +1414,10 @@ def _model_flow_nous(config, current_model="", args=None):
         if get_env_value("OPENAI_BASE_URL"):
             save_env_value("OPENAI_BASE_URL", "")
             save_env_value("OPENAI_API_KEY", "")
-        changed_defaults = apply_nous_provider_defaults(config)
         save_config(config)
         print(f"Default model set to: {selected} (via Nous Portal)")
-        if "tts" in changed_defaults:
-            print("TTS provider set to: OpenAI TTS via your Nous subscription")
-        else:
-            current_tts = str(config.get("tts", {}).get("provider") or "edge")
-            if current_tts.lower() not in {"", "edge"}:
-                print(f"Keeping your existing TTS provider: {current_tts}")
-        print()
-        for line in get_nous_subscription_explainer_lines():
-            print(line)
+        # Offer Tool Gateway enablement for paid subscribers
+        prompt_enable_tool_gateway(config)
     else:
         print("No change.")
 
@@ -1568,6 +1563,27 @@ def _model_flow_custom(config):
         return
 
     effective_key = api_key or current_key
+
+    # Hint: most local model servers (Ollama, vLLM, llama.cpp) require /v1
+    # in the base URL for OpenAI-compatible chat completions.  Prompt the
+    # user if the URL looks like a local server without /v1.
+    _url_lower = effective_url.rstrip("/").lower()
+    _looks_local = any(h in _url_lower for h in ("localhost", "127.0.0.1", "0.0.0.0", ":11434", ":8080", ":5000"))
+    if _looks_local and not _url_lower.endswith("/v1"):
+        print()
+        print(f"  Hint: Did you mean to add /v1 at the end?")
+        print(f"  Most local model servers (Ollama, vLLM, llama.cpp) require it.")
+        print(f"  e.g. {effective_url.rstrip('/')}/v1")
+        try:
+            _add_v1 = input("  Add /v1? [Y/n]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            _add_v1 = "n"
+        if _add_v1 in ("", "y", "yes"):
+            effective_url = effective_url.rstrip("/") + "/v1"
+            if base_url:
+                base_url = effective_url
+            print(f"  Updated URL: {effective_url}")
+        print()
 
     from hermes_cli.models import probe_api_models
 
@@ -2735,34 +2751,43 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
     #   1. models.dev registry (cached, filtered for agentic/tool-capable models)
     #   2. Curated static fallback list (offline insurance)
     #   3. Live /models endpoint probe (small providers without models.dev data)
-    curated = _PROVIDER_MODELS.get(provider_id, [])
-
-    # Try models.dev first — returns tool-capable models, filtered for noise
-    mdev_models: list = []
-    try:
-        from agent.models_dev import list_agentic_models
-        mdev_models = list_agentic_models(provider_id)
-    except Exception:
-        pass
-
-    if mdev_models:
-        model_list = mdev_models
-        print(f"  Found {len(model_list)} model(s) from models.dev registry")
-    elif curated and len(curated) >= 8:
-        # Curated list is substantial — use it directly, skip live probe
-        model_list = curated
-        print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
-    else:
+    #
+    # Ollama Cloud: dedicated merged discovery (live API + models.dev + disk cache)
+    if provider_id == "ollama-cloud":
+        from hermes_cli.models import fetch_ollama_cloud_models
         api_key_for_probe = existing_key or (get_env_value(key_env) if key_env else "")
-        live_models = fetch_api_models(api_key_for_probe, effective_base)
-        if live_models and len(live_models) >= len(curated):
-            model_list = live_models
-            print(f"  Found {len(model_list)} model(s) from {pconfig.name} API")
-        else:
+        model_list = fetch_ollama_cloud_models(api_key=api_key_for_probe, base_url=effective_base)
+        if model_list:
+            print(f"  Found {len(model_list)} model(s) from Ollama Cloud")
+    else:
+        curated = _PROVIDER_MODELS.get(provider_id, [])
+
+        # Try models.dev first — returns tool-capable models, filtered for noise
+        mdev_models: list = []
+        try:
+            from agent.models_dev import list_agentic_models
+            mdev_models = list_agentic_models(provider_id)
+        except Exception:
+            pass
+
+        if mdev_models:
+            model_list = mdev_models
+            print(f"  Found {len(model_list)} model(s) from models.dev registry")
+        elif curated and len(curated) >= 8:
+            # Curated list is substantial — use it directly, skip live probe
             model_list = curated
-            if model_list:
-                print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
-        # else: no defaults either, will fall through to raw input
+            print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
+        else:
+            api_key_for_probe = existing_key or (get_env_value(key_env) if key_env else "")
+            live_models = fetch_api_models(api_key_for_probe, effective_base)
+            if live_models and len(live_models) >= len(curated):
+                model_list = live_models
+                print(f"  Found {len(model_list)} model(s) from {pconfig.name} API")
+            else:
+                model_list = curated
+                if model_list:
+                    print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
+            # else: no defaults either, will fall through to raw input
 
     if provider_id in {"opencode-zen", "opencode-go"}:
         model_list = [normalize_opencode_model_id(provider_id, mid) for mid in model_list]
@@ -3071,6 +3096,18 @@ def cmd_config(args):
     config_command(args)
 
 
+def cmd_gateway_pool(args):
+    """Unified gateway-pool manifest management."""
+    from hermes_cli.gateway_pool_commands import gateway_pool_command
+    gateway_pool_command(args)
+
+
+def cmd_selfext(args):
+    """Self-extension run management."""
+    from hermes_cli.selfext_commands import selfext_command
+    selfext_command(args)
+
+
 def cmd_backup(args):
     """Back up Hermes home directory to a zip file."""
     if getattr(args, "quick", False):
@@ -3215,13 +3252,10 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
 
     Returns True if the build succeeded or was skipped (no package.json).
     """
-    if (
-        (PROJECT_ROOT / "hermes_cli" / "web_dist" / "index.html").exists()
-        and os.getenv("HERMESGO_FORCE_WEB_BUILD") != "1"
-    ):
-        print("Using bundled web UI frontend.", flush=True)
-        return True
     if not (web_dir / "package.json").exists():
+        return True
+    dist_index = PROJECT_ROOT / "hermes_cli" / "web_dist" / "index.html"
+    if dist_index.is_file():
         return True
     import shutil
     npm = shutil.which("npm")
@@ -4705,16 +4739,11 @@ def cmd_dashboard(args):
         sys.exit(1)
 
     from hermes_cli.web_server import start_server
-    browser_path = "/"
-    oauth_provider = getattr(args, "oauth_provider", None)
-    if oauth_provider:
-        browser_path = f"/env?oauth={urllib.parse.quote(str(oauth_provider).strip())}"
     start_server(
         host=args.host,
         port=args.port,
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
-        browser_path=browser_path,
     )
 
 
@@ -4872,7 +4901,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "huggingface", "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "xiaomi", "arcee"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "xai", "ollama-cloud", "huggingface", "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "xiaomi", "arcee"],
         default=None,
         help="Inference provider (default: auto)"
     )
@@ -5163,8 +5192,8 @@ For more help on a command:
     auth_add.add_argument("--inference-url", help="Nous inference base URL")
     auth_add.add_argument("--client-id", help="OAuth client id")
     auth_add.add_argument("--scope", help="OAuth scope override")
-    auth_add.add_argument("--device-auth", action="store_true", help="Force the Codex device-auth login flow")
     auth_add.add_argument("--no-browser", action="store_true", help="Do not auto-open a browser for OAuth login")
+    auth_add.add_argument("--device-auth", action="store_true", help="Compatibility alias; OpenAI Codex still uses ChatGPT browser OAuth")
     auth_add.add_argument("--timeout", type=float, help="OAuth/network timeout in seconds")
     auth_add.add_argument("--insecure", action="store_true", help="Disable TLS verification for OAuth login")
     auth_add.add_argument("--ca-bundle", help="Custom CA bundle for OAuth login")
@@ -5642,6 +5671,18 @@ Examples:
     memory_sub.add_parser("setup", help="Interactive provider selection and configuration")
     memory_sub.add_parser("status", help="Show current memory provider config")
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
+    _reset_parser = memory_sub.add_parser(
+        "reset",
+        help="Erase all built-in memory (MEMORY.md and USER.md)",
+    )
+    _reset_parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip confirmation prompt",
+    )
+    _reset_parser.add_argument(
+        "--target", choices=["all", "memory", "user"], default="all",
+        help="Which store to reset: 'all' (default), 'memory', or 'user'",
+    )
 
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)
@@ -5654,6 +5695,44 @@ Examples:
             save_config(config)
             print("\n  ✓ Memory provider: built-in only")
             print("  Saved to config.yaml\n")
+        elif sub == "reset":
+            from hermes_constants import get_hermes_home, display_hermes_home
+            mem_dir = get_hermes_home() / "memories"
+            target = getattr(args, "target", "all")
+            files_to_reset = []
+            if target in ("all", "memory"):
+                files_to_reset.append(("MEMORY.md", "agent notes"))
+            if target in ("all", "user"):
+                files_to_reset.append(("USER.md", "user profile"))
+
+            # Check what exists
+            existing = [(f, desc) for f, desc in files_to_reset if (mem_dir / f).exists()]
+            if not existing:
+                print(f"\n  Nothing to reset — no memory files found in {display_hermes_home()}/memories/\n")
+                return
+
+            print(f"\n  This will permanently erase the following memory files:")
+            for f, desc in existing:
+                path = mem_dir / f
+                size = path.stat().st_size
+                print(f"    ◆ {f} ({desc}) — {size:,} bytes")
+
+            if not getattr(args, "yes", False):
+                try:
+                    answer = input("\n  Type 'yes' to confirm: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n  Cancelled.\n")
+                    return
+                if answer != "yes":
+                    print("  Cancelled.\n")
+                    return
+
+            for f, desc in existing:
+                (mem_dir / f).unlink()
+                print(f"  ✓ Deleted {f} ({desc})")
+
+            print(f"\n  Memory reset complete. New sessions will start with a blank slate.")
+            print(f"  Files were in: {display_hermes_home()}/memories/\n")
         else:
             from hermes_cli.memory_setup import memory_command
             memory_command(args)
@@ -6215,6 +6294,149 @@ Examples:
     profile_parser.set_defaults(func=cmd_profile)
 
     # =========================================================================
+    # gateway-pool command
+    # =========================================================================
+    gateway_pool_parser = subparsers.add_parser(
+        "gateway-pool",
+        help="Manage unified one-key / many-backend gateway manifests",
+    )
+    gateway_pool_subparsers = gateway_pool_parser.add_subparsers(dest="gateway_pool_action")
+
+    gateway_pool_show = gateway_pool_subparsers.add_parser("show", help="Show current gateway pool manifest")
+    gateway_pool_show.add_argument(
+        "--format",
+        choices=["yaml", "json"],
+        default="yaml",
+        help="Output format (default: yaml)",
+    )
+
+    gateway_pool_init = gateway_pool_subparsers.add_parser("init", help="Initialize or update the gateway pool manifest")
+    gateway_pool_init.add_argument(
+        "--frontend-base-url",
+        default="http://127.0.0.1:4000/v1",
+        help="Frontend base URL exposed to Hermes or other clients",
+    )
+    gateway_pool_init.add_argument(
+        "--master-key",
+        default="",
+        help="Explicit frontend master key value (default: empty, prefer env)",
+    )
+    gateway_pool_init.add_argument(
+        "--master-key-env",
+        default="HERMES_GATEWAY_MASTER_KEY",
+        help="Environment variable name for the frontend master key",
+    )
+
+    gateway_pool_add = gateway_pool_subparsers.add_parser("add-backend", help="Add or replace a backend entry")
+    gateway_pool_add.add_argument("--id", dest="backend_id", required=True, help="Stable backend identifier")
+    gateway_pool_add.add_argument("--model-name", required=True, help="Frontend-exposed model alias, e.g. local/medium/strong")
+    gateway_pool_add.add_argument("--upstream-model", required=True, help="Upstream provider model name")
+    gateway_pool_add.add_argument("--provider", default="openai", help="Backend provider label")
+    gateway_pool_add.add_argument("--api-key-env", default="", help="Environment variable for upstream API key")
+    gateway_pool_add.add_argument("--base-url", default="", help="Upstream base URL for local runtimes or custom gateways")
+    gateway_pool_add.add_argument("--weight", type=int, default=1, help="Backend weight for future load balancing")
+    gateway_pool_add.add_argument("--rpm", type=int, default=None, help="Optional requests-per-minute limit")
+    gateway_pool_add.add_argument("--tpm", type=int, default=None, help="Optional tokens-per-minute limit")
+    gateway_pool_add.add_argument("--tags", default="", help="Comma-separated tags")
+    gateway_pool_add.add_argument("--disabled", action="store_true", help="Create the backend in disabled state")
+
+    gateway_pool_subparsers.add_parser("write-litellm", help="Render LiteLLM config from the current manifest")
+    gateway_pool_bootstrap = gateway_pool_subparsers.add_parser(
+        "bootstrap-free",
+        help="Create a free-first gateway profile from currently configured provider keys",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--frontend-base-url",
+        default="http://127.0.0.1:4000/v1",
+        help="Frontend base URL exposed to Hermes or other clients",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--master-key",
+        default="",
+        help="Explicit frontend master key value (default: empty, prefer env)",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--master-key-env",
+        default="HERMES_GATEWAY_MASTER_KEY",
+        help="Environment variable name for the frontend master key",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--model-alias",
+        default="free",
+        help="Frontend model alias to route through free-first providers",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--providers",
+        default="",
+        help="Optional comma-separated provider override order",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--write-litellm",
+        action="store_true",
+        help="Also render litellm.config.yaml after bootstrap",
+    )
+    gateway_pool_parser.set_defaults(func=cmd_gateway_pool, gateway_pool_action="show")
+
+    # =========================================================================
+    # selfext command
+    # =========================================================================
+    selfext_parser = subparsers.add_parser(
+        "selfext",
+        help="Bootstrap and inspect Hermes self-extension runs",
+    )
+    selfext_subparsers = selfext_parser.add_subparsers(dest="selfext_action")
+
+    selfext_start = selfext_subparsers.add_parser("start", help="Start a new self-extension run")
+    selfext_start.add_argument("goal", nargs="+", help="Self-extension goal text")
+    selfext_start.add_argument("--profile-name", default=None, help="Profile name recorded in the run metadata")
+    selfext_start.add_argument(
+        "--route-tier",
+        choices=["local", "medium", "strong"],
+        default="strong",
+        help="Requested route tier (default: strong)",
+    )
+    selfext_start.add_argument(
+        "--gateway-model-name",
+        default=None,
+        help="Frontend gateway model alias to record (default: same as route tier)",
+    )
+    selfext_start.add_argument("--run-id", default=None, help="Optional explicit run id")
+
+    selfext_prepare = selfext_subparsers.add_parser(
+        "prepare-workspace",
+        help="Create an isolated self-extension workspace with copied rules/docs and a HermesGo subtree",
+    )
+    selfext_prepare.add_argument("goal", nargs="+", help="Self-extension goal text")
+    selfext_prepare.add_argument("--profile-name", default=None, help="Profile name recorded in the run metadata")
+    selfext_prepare.add_argument(
+        "--route-tier",
+        choices=["local", "medium", "strong"],
+        default="strong",
+        help="Requested route tier (default: strong)",
+    )
+    selfext_prepare.add_argument(
+        "--gateway-model-name",
+        default=None,
+        help="Frontend gateway model alias to record (default: same as route tier)",
+    )
+    selfext_prepare.add_argument(
+        "--source-root",
+        default=None,
+        help="Source repository root to copy from (default: current working directory)",
+    )
+    selfext_prepare.add_argument(
+        "--workspace-dir",
+        default=None,
+        help="Target workspace directory (default: ./workspaces/hermesgo)",
+    )
+    selfext_prepare.add_argument("--run-id", default=None, help="Optional explicit run id")
+
+    selfext_show = selfext_subparsers.add_parser("show", help="Show a self-extension run and latest checkpoint")
+    selfext_show.add_argument("run_id", help="Run identifier")
+
+    selfext_parser.set_defaults(func=cmd_selfext)
+
+    # =========================================================================
     # completion command
     # =========================================================================
     completion_parser = subparsers.add_parser(
@@ -6238,11 +6460,6 @@ Examples:
     dashboard_parser.add_argument("--port", type=int, default=9119, help="Port (default 9119)")
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="Host (default 127.0.0.1)")
     dashboard_parser.add_argument("--no-open", action="store_true", help="Don't open browser automatically")
-    dashboard_parser.add_argument(
-        "--oauth-provider",
-        default=None,
-        help="Auto-open the OAuth login panel for a provider (for example: openai-codex)",
-    )
     dashboard_parser.add_argument(
         "--insecure", action="store_true",
         help="Allow binding to non-localhost (DANGEROUS: exposes API keys on the network)",

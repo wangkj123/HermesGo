@@ -130,6 +130,15 @@ export const api = {
   // OAuth provider management
   getOAuthProviders: () =>
     fetchJSON<OAuthProvidersResponse>("/api/providers/oauth"),
+  testProvider: (provider_id: string, model?: string) =>
+    fetchJSON<{ ok: boolean; provider: string; api_mode: string; base_url: string; models_count?: number; note?: string }>(
+      "/api/providers/test",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider_id, model }),
+      },
+    ),
   disconnectOAuthProvider: async (providerId: string) => {
     const token = await getSessionToken();
     return fetchJSON<{ ok: boolean; provider: string }>(
@@ -140,7 +149,7 @@ export const api = {
       },
     );
   },
-  startOAuthLogin: async (providerId: string) => {
+  startOAuthLogin: async (providerId: string, options?: { switchAccount?: boolean }) => {
     const token = await getSessionToken();
     return fetchJSON<OAuthStartResponse>(
       `/api/providers/oauth/${encodeURIComponent(providerId)}/start`,
@@ -150,7 +159,7 @@ export const api = {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: "{}",
+        body: JSON.stringify(options ?? {}),
       },
     );
   },
@@ -198,6 +207,54 @@ export const api = {
     fetchJSON<PluginManifestResponse[]>("/api/dashboard/plugins"),
   rescanPlugins: () =>
     fetchJSON<{ ok: boolean; count: number }>("/api/dashboard/plugins/rescan"),
+
+  // SelfExt dashboard
+  getSelfExtWorkspace: () =>
+    fetchJSON<SelfExtWorkspaceResponse>("/api/selfext/workspace"),
+  getSelfExtRuns: (limit = 25) =>
+    fetchJSON<SelfExtRunsResponse>(`/api/selfext/runs?limit=${limit}`),
+  controlSelfExtRun: (
+    runId: string,
+    body: { action: "pause" | "resume" | "cancel" | "intervene"; note?: string },
+  ) =>
+    fetchJSON<SelfExtRunPayload>(`/api/selfext/runs/${encodeURIComponent(runId)}/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  runSelfExtAction: (action: "doctor" | "launch" | "status" | "readme", timeout_sec = 300) =>
+    fetchJSON<SelfExtActionResponse>(`/api/selfext/actions/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timeout_sec }),
+    }),
+  startSelfExtRun: (body: {
+    goal: string;
+    validation_scenario?: string;
+    profile_name?: string;
+    route_tier?: string;
+    gateway_model_name?: string;
+    run_id?: string;
+  }) =>
+    fetchJSON<SelfExtRunStartResponse>("/api/selfext/run/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  runSelfExtChat: (body: { prompt: string; session_id?: string; timeout_sec?: number }) =>
+    fetchJSON<SelfExtChatResponse>("/api/selfext/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  // Web chat
+  chat: (body: { message: string; session_id?: string; timeout_sec?: number }) =>
+    fetchJSON<ChatResponse>("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };
 
 export interface PlatformStatus {
@@ -391,8 +448,9 @@ export interface OAuthProvider {
   id: string;
   name: string;
   /** "pkce" (browser redirect + paste code), "device_code" (show code + URL),
-   *  or "external" (delegated to a separate CLI like Claude Code or Qwen). */
-  flow: "pkce" | "device_code" | "external";
+   *  "browser" (browser redirect + localhost callback), or "external"
+   *  (delegated to a separate CLI like Claude Code or Qwen). */
+  flow: "pkce" | "device_code" | "browser" | "external";
   cli_command: string;
   docs_url: string;
   status: OAuthProviderStatus;
@@ -415,6 +473,13 @@ export type OAuthStartResponse =
       flow: "device_code";
       user_code: string;
       verification_url: string;
+      expires_in: number;
+      poll_interval: number;
+    }
+  | {
+      session_id: string;
+      flow: "browser";
+      auth_url: string;
       expires_in: number;
       poll_interval: number;
     };
@@ -452,4 +517,114 @@ export interface PluginManifestResponse {
   css?: string | null;
   has_api: boolean;
   source: string;
+}
+
+export interface SelfExtWorkspaceResponse {
+  workspace_root: string;
+  package_root: string;
+  manifest: Record<string, unknown>;
+  start_guide: string;
+  handoff: string;
+  debug_log_tail: string[];
+  keys_page_path: string;
+  selfext_cli_ready: boolean;
+}
+
+export interface SelfExtRunRecord {
+  run_id: string;
+  goal: string;
+  profile_name: string;
+  status: string;
+  current_stage_id?: string | null;
+  current_unit_id?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SelfExtStageRecord {
+  run_id: string;
+  stage_id: string;
+  name: string;
+  status: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SelfExtUnitRecord {
+  run_id: string;
+  stage_id: string;
+  unit_id: string;
+  name: string;
+  status: string;
+  artifacts: string[];
+  verification_status?: string | null;
+  next_action?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SelfExtCheckpointRecord {
+  run_id: string;
+  stage_id: string;
+  unit_id: string;
+  profile_name: string;
+  status: string;
+  input_summary?: string | null;
+  output_summary?: string | null;
+  artifact_paths: string[];
+  verification?: Record<string, unknown> | null;
+  next_action?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface SelfExtRunPayload {
+  run: SelfExtRunRecord;
+  stages: SelfExtStageRecord[];
+  units: SelfExtUnitRecord[];
+  latest_checkpoint?: SelfExtCheckpointRecord | null;
+}
+
+export interface SelfExtRunsResponse {
+  runs: SelfExtRunPayload[];
+  total: number;
+}
+
+export interface SelfExtActionResponse {
+  ok: boolean;
+  action: string;
+  command: string[];
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  duration_sec: number;
+}
+
+export interface SelfExtRunStartResponse {
+  run_id: string;
+  stage_ids: string[];
+  first_unit_id: string;
+  route_tier: string;
+  gateway_model_name: string;
+}
+
+export interface SelfExtChatResponse {
+  ok: boolean;
+  command: string[];
+  exit_code: number;
+  response: string;
+  stderr: string;
+  session_id?: string;
+  duration_sec: number;
+}
+
+export interface ChatResponse {
+  ok: boolean;
+  exit_code: number;
+  response: string;
+  session_id?: string;
+  duration_sec: number;
 }

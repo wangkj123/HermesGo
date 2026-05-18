@@ -55,6 +55,18 @@ const PROVIDER_GROUPS: { prefix: string; name: string; priority: number }[] = [
   { prefix: "XIAOMI_",          name: "Xiaomi MiMo",       priority: 13 },
 ];
 
+const GROUP_TO_PROVIDER_ID: Record<string, string> = {
+  DeepSeek: "deepseek",
+  "DashScope (Qwen)": "alibaba",
+  "GLM / Z.AI": "zai",
+  "Kimi / Moonshot": "kimi-coding",
+  "MiniMax (China)": "minimax-cn",
+  MiniMax: "minimax",
+  Gemini: "gemini",
+  "Hugging Face": "huggingface",
+  OpenRouter: "openrouter",
+};
+
 function getProviderGroup(key: string): string {
   for (const g of PROVIDER_GROUPS) {
     if (key.startsWith(g.prefix)) return g.name;
@@ -262,6 +274,7 @@ function ProviderGroupCard({
   onClear,
   onReveal,
   onCancelEdit,
+  onTestProvider,
 }: {
   group: ProviderGroup;
   edits: Record<string, string>;
@@ -272,6 +285,7 @@ function ProviderGroupCard({
   onClear: (key: string) => void;
   onReveal: (key: string) => void;
   onCancelEdit: (key: string) => void;
+  onTestProvider: (providerId: string, providerName: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const { t } = useI18n();
@@ -285,6 +299,7 @@ function ProviderGroupCard({
 
   // Get a representative URL for "Get key" link
   const keyUrl = apiKeys.find(([, info]) => info.url)?.[1]?.url ?? null;
+  const providerId = GROUP_TO_PROVIDER_ID[group.name] ?? "";
 
   return (
     <div className="border border-border">
@@ -304,6 +319,22 @@ function ProviderGroupCard({
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {providerId && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-[0.6rem]"
+              disabled={!hasAnyConfigured}
+              title={t.env.testProviderHint}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onTestProvider(providerId, group.name);
+              }}
+            >
+              {t.env.testProvider}
+            </Button>
+          )}
           {keyUrl && (
             <a href={keyUrl} target="_blank" rel="noreferrer"
               className="inline-flex items-center gap-1 text-[0.65rem] text-primary hover:underline"
@@ -360,10 +391,14 @@ export default function EnvPage() {
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(true); // Show all providers by default
+  const [quickProvider, setQuickProvider] = useState<"deepseek" | "zai" | "kimi_cn" | "minimax_cn" | "dashscope">("deepseek");
+  const [quickValue, setQuickValue] = useState("");
+  const [quickBusy, setQuickBusy] = useState(false);
   const [searchParams] = useSearchParams();
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const autoOpenProviderId = searchParams.get("oauth");
+  const spotlightQuick = searchParams.get("quick") === "1";
 
   useEffect(() => {
     api.getEnvVars().then(setVars).catch(() => {});
@@ -427,6 +462,91 @@ export default function EnvPage() {
 
   const cancelEdit = (key: string) => {
     setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+  };
+
+  const handleTestProvider = async (providerId: string, providerName: string) => {
+    try {
+      const resp = await api.testProvider(providerId);
+      const modelsInfo = resp.models_count !== undefined ? ` (${resp.models_count})` : "";
+      showToast(`${t.env.testOkTitle}: ${resp.provider}${modelsInfo}`, "success");
+    } catch (e: any) {
+      showToast(`${t.env.testFailedTitle} (${providerName}): ${String(e?.message ?? e)}`, "error");
+    }
+  };
+
+  const QUICK_PROVIDERS = [
+    {
+      id: "deepseek" as const,
+      label: "DeepSeek",
+      envKey: "DEEPSEEK_API_KEY",
+      providerId: "deepseek",
+      applyUrl: "https://platform.deepseek.com/api_keys",
+    },
+    {
+      id: "zai" as const,
+      label: "GLM / Z.AI",
+      envKey: "GLM_API_KEY",
+      providerId: "zai",
+      applyUrl: "https://z.ai/",
+    },
+    {
+      id: "kimi_cn" as const,
+      label: "Kimi (China)",
+      envKey: "KIMI_CN_API_KEY",
+      providerId: "kimi-coding-cn",
+      applyUrl: "https://platform.moonshot.cn/",
+    },
+    {
+      id: "minimax_cn" as const,
+      label: "MiniMax (China)",
+      envKey: "MINIMAX_CN_API_KEY",
+      providerId: "minimax-cn",
+      applyUrl: "https://www.minimaxi.com/",
+    },
+    {
+      id: "dashscope" as const,
+      label: "DashScope (Qwen)",
+      envKey: "DASHSCOPE_API_KEY",
+      providerId: "alibaba",
+      applyUrl: "https://modelstudio.console.alibabacloud.com/",
+    },
+  ];
+
+  const quickDef = QUICK_PROVIDERS.find((p) => p.id === quickProvider)!;
+
+  const runQuickSetup = async () => {
+    const value = quickValue.trim();
+    if (!value) return;
+    setQuickBusy(true);
+    try {
+      await api.setEnvVar(quickDef.envKey, value);
+      setVars((prev) =>
+        prev
+          ? {
+              ...prev,
+              [quickDef.envKey]: {
+                ...(prev[quickDef.envKey] ?? {
+                  description: quickDef.label,
+                  prompt: quickDef.envKey,
+                  url: "",
+                  password: true,
+                  category: "provider",
+                  tools: [],
+                }),
+                is_set: true,
+                redacted_value: value.slice(0, 4) + "..." + value.slice(-4),
+              },
+            }
+          : prev,
+      );
+      setQuickValue("");
+      showToast(t.env.quickSaved, "success");
+      await handleTestProvider(quickDef.providerId, quickDef.label);
+    } catch (e: any) {
+      showToast(`${t.env.quickFailed}: ${String(e?.message ?? e)}`, "error");
+    } finally {
+      setQuickBusy(false);
+    }
   };
 
   /* ---- Build provider groups ---- */
@@ -498,7 +618,7 @@ export default function EnvPage() {
       <div className="flex items-center justify-between">
         <div className="flex flex-col gap-1">
           <p className="text-sm text-muted-foreground">
-            {t.env.description} <code>~/.hermes/.env</code>
+            {t.env.description} <code>HERMES_HOME/.env</code>
           </p>
           <p className="text-[0.7rem] text-muted-foreground/70">
             {t.env.changesNote}
@@ -508,6 +628,54 @@ export default function EnvPage() {
           {showAdvanced ? t.env.hideAdvanced : t.env.showAdvanced}
         </Button>
       </div>
+
+      <Card className={spotlightQuick ? "ring-2 ring-primary/60 border-primary/60" : undefined}>
+        <CardHeader>
+          <CardTitle className="text-base">{t.env.quickTitle}</CardTitle>
+          <CardDescription>{t.env.quickDesc}</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          <div className="flex flex-wrap gap-2">
+            {QUICK_PROVIDERS.map((p) => (
+              <Button
+                key={p.id}
+                type="button"
+                variant={quickProvider === p.id ? "default" : "outline"}
+                onClick={() => setQuickProvider(p.id)}
+                disabled={quickBusy}
+              >
+                {p.label}
+              </Button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <a
+              href={quickDef.applyUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-primary hover:underline"
+            >
+              {t.env.getKey} ({quickDef.label}) <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+          <div className="grid gap-2">
+            <Label className="text-xs">{t.env.quickPasteKey.replace("{provider}", quickDef.label)}</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                value={quickValue}
+                onChange={(e) => setQuickValue(e.target.value)}
+                placeholder={t.env.quickPlaceholder}
+                className="font-mono-ui text-xs"
+                disabled={quickBusy}
+              />
+              <Button onClick={runQuickSetup} disabled={quickBusy || !quickValue.trim()}>
+                {quickBusy ? t.common.saving : t.common.save}
+              </Button>
+            </div>
+            <p className="text-[0.7rem] text-muted-foreground/70">{t.env.quickNote}</p>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* ═══════════════ OAuth Logins ══ */}
       <OAuthProvidersCard
@@ -535,6 +703,7 @@ export default function EnvPage() {
               group={group}
               edits={edits} setEdits={setEdits} revealed={revealed} saving={saving}
               onSave={handleSave} onClear={handleClear} onReveal={handleReveal} onCancelEdit={cancelEdit}
+              onTestProvider={handleTestProvider}
             />
           ))}
         </CardContent>

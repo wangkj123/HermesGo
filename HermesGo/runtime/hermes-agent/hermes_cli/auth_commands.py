@@ -233,10 +233,19 @@ def auth_add_command(args) -> None:
         return
 
     if provider == "openai-codex":
-        creds = auth_mod._codex_cli_browser_login(
-            open_browser=not getattr(args, "no_browser", False),
-            force_fresh_login=bool(getattr(args, "device_auth", False)),
-        )
+        if bool(getattr(args, "device_auth", False)):
+            print("--device-auth is accepted for compatibility; HermesGo will use ChatGPT browser OAuth instead.")
+            creds = auth_mod._codex_browser_oauth_login(
+                open_browser=not getattr(args, "no_browser", False),
+                preferred_port=1455,
+            )
+            entry_source = f"{SOURCE_MANUAL}:codex_browser_local"
+        else:
+            creds = auth_mod._codex_browser_oauth_login(
+                open_browser=not getattr(args, "no_browser", False),
+                preferred_port=1455,
+            )
+            entry_source = f"{SOURCE_MANUAL}:codex_browser_local"
         label = (getattr(args, "label", None) or "").strip() or label_from_token(
             creds["tokens"]["access_token"],
             _oauth_default_label(provider, len(pool.entries()) + 1),
@@ -247,7 +256,7 @@ def auth_add_command(args) -> None:
             label=label,
             auth_type=AUTH_TYPE_OAUTH,
             priority=0,
-            source=f"{SOURCE_MANUAL}:codex_browser_local",
+            source=entry_source,
             access_token=creds["tokens"]["access_token"],
             refresh_token=creds["tokens"].get("refresh_token"),
             base_url=creds.get("base_url"),

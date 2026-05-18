@@ -13,19 +13,19 @@
 
 ## 新版本特性
 
-- `HermesGo.exe` 是主入口，保留经典启动器，适合新手直接点选。
-- 本地 2B 启动只走离线模型，不会触发 ChatGPT / Codex 登录。
-- `Cloud: GPT-5.4 Mini` 只有在未登录时才会自动发起 Codex 登录。
+- `HermesGo.exe` 是主入口，启动器默认保持 `Beginner: Local Start`，`Cloud: GPT-5.4 Mini` 仍可手动选择，另有 `Expert: Dashboard / Config` 和各类工具动作。
+- `Cloud: GPT-5.4 Mini` 会在缺少授权时先走浏览器登录流程，再继续启动 Dashboard 和聊天窗口。
 - OpenAI Codex 登录走的是 Hermes 自己内置的浏览器 / 认证流程，不依赖外部安装的 Codex CLI。
 - 绿色包不会携带本地 `auth.json`、`auth.lock` 这类账号凭据文件。
+- 更新功能保留在启动器底部，不再暴露其它启动入口。
 - 原来的版本保留在 GitHub Releases，不删除、不覆盖。
 
 ## 兼容性说明
 
 - 旧版继续可用，适合已经习惯原工作流的用户。
 - 新版新增的是绿色版 / U 盘版 / 一键安装版的便携体验。
-- 如果你只想跑本地大模型，直接用本地 2B 入口即可。
-- 如果你要云端能力，只在 `Cloud: GPT-5.4 Mini` 里登录一次即可。
+- 如果你要云端能力，直接选择 `Cloud: GPT-5.4 Mini`；不选云端时，启动器默认保持本地优先。
+- 更新功能仍然保留在启动器底部。
 
 ## 发布约定
 

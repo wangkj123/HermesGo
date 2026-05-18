@@ -11,6 +11,9 @@ Usage:
     hermes gateway status      # Show gateway status
     hermes gateway install     # Install gateway service
     hermes gateway uninstall   # Uninstall gateway service
+    hermes gateway-pool show   # Show unified gateway manifest
+    hermes gateway-pool write-litellm  # Render LiteLLM config
+    hermes gateway-pool bootstrap-free # Build free-first pool from existing keys
     hermes setup               # Interactive setup wizard
     hermes logout              # Clear stored authentication
     hermes status              # Show status of all components
@@ -38,6 +41,7 @@ Usage:
     hermes update              Update to latest version
     hermes uninstall           Uninstall Hermes Agent
     hermes acp                 Run as an ACP server for editor integration
+    hermes selfext start ...   Start a self-extension run
     hermes sessions browse     Interactive session picker with search
 
     hermes claw migrate --dry-run  # Preview migration without changes
@@ -3092,6 +3096,18 @@ def cmd_config(args):
     config_command(args)
 
 
+def cmd_gateway_pool(args):
+    """Unified gateway-pool manifest management."""
+    from hermes_cli.gateway_pool_commands import gateway_pool_command
+    gateway_pool_command(args)
+
+
+def cmd_selfext(args):
+    """Self-extension run management."""
+    from hermes_cli.selfext_commands import selfext_command
+    selfext_command(args)
+
+
 def cmd_backup(args):
     """Back up Hermes home directory to a zip file."""
     if getattr(args, "quick", False):
@@ -3237,6 +3253,9 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     Returns True if the build succeeded or was skipped (no package.json).
     """
     if not (web_dir / "package.json").exists():
+        return True
+    dist_index = PROJECT_ROOT / "hermes_cli" / "web_dist" / "index.html"
+    if dist_index.is_file():
         return True
     import shutil
     npm = shutil.which("npm")
@@ -5173,6 +5192,7 @@ For more help on a command:
     auth_add.add_argument("--inference-url", help="Nous inference base URL")
     auth_add.add_argument("--client-id", help="OAuth client id")
     auth_add.add_argument("--scope", help="OAuth scope override")
+    auth_add.add_argument("--device-auth", action="store_true", help="Use OAuth device code flow instead of browser login")
     auth_add.add_argument("--no-browser", action="store_true", help="Do not auto-open a browser for OAuth login")
     auth_add.add_argument("--timeout", type=float, help="OAuth/network timeout in seconds")
     auth_add.add_argument("--insecure", action="store_true", help="Disable TLS verification for OAuth login")
@@ -6272,6 +6292,149 @@ Examples:
                                 help="Profile name (default: inferred from archive)")
 
     profile_parser.set_defaults(func=cmd_profile)
+
+    # =========================================================================
+    # gateway-pool command
+    # =========================================================================
+    gateway_pool_parser = subparsers.add_parser(
+        "gateway-pool",
+        help="Manage unified one-key / many-backend gateway manifests",
+    )
+    gateway_pool_subparsers = gateway_pool_parser.add_subparsers(dest="gateway_pool_action")
+
+    gateway_pool_show = gateway_pool_subparsers.add_parser("show", help="Show current gateway pool manifest")
+    gateway_pool_show.add_argument(
+        "--format",
+        choices=["yaml", "json"],
+        default="yaml",
+        help="Output format (default: yaml)",
+    )
+
+    gateway_pool_init = gateway_pool_subparsers.add_parser("init", help="Initialize or update the gateway pool manifest")
+    gateway_pool_init.add_argument(
+        "--frontend-base-url",
+        default="http://127.0.0.1:4000/v1",
+        help="Frontend base URL exposed to Hermes or other clients",
+    )
+    gateway_pool_init.add_argument(
+        "--master-key",
+        default="",
+        help="Explicit frontend master key value (default: empty, prefer env)",
+    )
+    gateway_pool_init.add_argument(
+        "--master-key-env",
+        default="HERMES_GATEWAY_MASTER_KEY",
+        help="Environment variable name for the frontend master key",
+    )
+
+    gateway_pool_add = gateway_pool_subparsers.add_parser("add-backend", help="Add or replace a backend entry")
+    gateway_pool_add.add_argument("--id", dest="backend_id", required=True, help="Stable backend identifier")
+    gateway_pool_add.add_argument("--model-name", required=True, help="Frontend-exposed model alias, e.g. local/medium/strong")
+    gateway_pool_add.add_argument("--upstream-model", required=True, help="Upstream provider model name")
+    gateway_pool_add.add_argument("--provider", default="openai", help="Backend provider label")
+    gateway_pool_add.add_argument("--api-key-env", default="", help="Environment variable for upstream API key")
+    gateway_pool_add.add_argument("--base-url", default="", help="Upstream base URL for local runtimes or custom gateways")
+    gateway_pool_add.add_argument("--weight", type=int, default=1, help="Backend weight for future load balancing")
+    gateway_pool_add.add_argument("--rpm", type=int, default=None, help="Optional requests-per-minute limit")
+    gateway_pool_add.add_argument("--tpm", type=int, default=None, help="Optional tokens-per-minute limit")
+    gateway_pool_add.add_argument("--tags", default="", help="Comma-separated tags")
+    gateway_pool_add.add_argument("--disabled", action="store_true", help="Create the backend in disabled state")
+
+    gateway_pool_subparsers.add_parser("write-litellm", help="Render LiteLLM config from the current manifest")
+    gateway_pool_bootstrap = gateway_pool_subparsers.add_parser(
+        "bootstrap-free",
+        help="Create a free-first gateway profile from currently configured provider keys",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--frontend-base-url",
+        default="http://127.0.0.1:4000/v1",
+        help="Frontend base URL exposed to Hermes or other clients",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--master-key",
+        default="",
+        help="Explicit frontend master key value (default: empty, prefer env)",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--master-key-env",
+        default="HERMES_GATEWAY_MASTER_KEY",
+        help="Environment variable name for the frontend master key",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--model-alias",
+        default="free",
+        help="Frontend model alias to route through free-first providers",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--providers",
+        default="",
+        help="Optional comma-separated provider override order",
+    )
+    gateway_pool_bootstrap.add_argument(
+        "--write-litellm",
+        action="store_true",
+        help="Also render litellm.config.yaml after bootstrap",
+    )
+    gateway_pool_parser.set_defaults(func=cmd_gateway_pool, gateway_pool_action="show")
+
+    # =========================================================================
+    # selfext command
+    # =========================================================================
+    selfext_parser = subparsers.add_parser(
+        "selfext",
+        help="Bootstrap and inspect Hermes self-extension runs",
+    )
+    selfext_subparsers = selfext_parser.add_subparsers(dest="selfext_action")
+
+    selfext_start = selfext_subparsers.add_parser("start", help="Start a new self-extension run")
+    selfext_start.add_argument("goal", nargs="+", help="Self-extension goal text")
+    selfext_start.add_argument("--profile-name", default=None, help="Profile name recorded in the run metadata")
+    selfext_start.add_argument(
+        "--route-tier",
+        choices=["local", "medium", "strong"],
+        default="strong",
+        help="Requested route tier (default: strong)",
+    )
+    selfext_start.add_argument(
+        "--gateway-model-name",
+        default=None,
+        help="Frontend gateway model alias to record (default: same as route tier)",
+    )
+    selfext_start.add_argument("--run-id", default=None, help="Optional explicit run id")
+
+    selfext_prepare = selfext_subparsers.add_parser(
+        "prepare-workspace",
+        help="Create an isolated self-extension workspace with copied rules/docs and a HermesGo subtree",
+    )
+    selfext_prepare.add_argument("goal", nargs="+", help="Self-extension goal text")
+    selfext_prepare.add_argument("--profile-name", default=None, help="Profile name recorded in the run metadata")
+    selfext_prepare.add_argument(
+        "--route-tier",
+        choices=["local", "medium", "strong"],
+        default="strong",
+        help="Requested route tier (default: strong)",
+    )
+    selfext_prepare.add_argument(
+        "--gateway-model-name",
+        default=None,
+        help="Frontend gateway model alias to record (default: same as route tier)",
+    )
+    selfext_prepare.add_argument(
+        "--source-root",
+        default=None,
+        help="Source repository root to copy from (default: current working directory)",
+    )
+    selfext_prepare.add_argument(
+        "--workspace-dir",
+        default=None,
+        help="Target workspace directory (default: ./workspaces/hermesgo)",
+    )
+    selfext_prepare.add_argument("--run-id", default=None, help="Optional explicit run id")
+
+    selfext_show = selfext_subparsers.add_parser("show", help="Show a self-extension run and latest checkpoint")
+    selfext_show.add_argument("run_id", help="Run identifier")
+
+    selfext_parser.set_defaults(func=cmd_selfext)
 
     # =========================================================================
     # completion command

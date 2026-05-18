@@ -234,6 +234,10 @@ export interface Translations {
     llmProviders: string;
     providersConfigured: string;
     getKey: string;
+    testProvider: string;
+    testProviderHint: string;
+    testOkTitle: string;
+    testFailedTitle: string;
     notConfigured: string;
     notSet: string;
     keysCount: string;
@@ -241,6 +245,13 @@ export interface Translations {
     replaceCurrentValue: string;
     showValue: string;
     hideValue: string;
+    quickTitle: string;
+    quickDesc: string;
+    quickPasteKey: string;
+    quickPlaceholder: string;
+    quickNote: string;
+    quickSaved: string;
+    quickFailed: string;
   };
 
   // ── OAuth ──

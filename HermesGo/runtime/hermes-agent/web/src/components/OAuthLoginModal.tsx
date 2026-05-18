@@ -51,6 +51,8 @@ export function OAuthLoginModal({
         window.open(resp.auth_url, "_blank", "noopener,noreferrer");
       } else if (resp.flow === "device_code") {
         window.open(resp.verification_url, "_blank", "noopener,noreferrer");
+      } else if (resp.flow === "browser") {
+        window.open(resp.auth_url, "_blank", "noopener,noreferrer");
       }
     } catch (e) {
       if (!isMounted.current) {
@@ -361,6 +363,15 @@ export function OAuthLoginModal({
                 <p>{t.oauth.browserLoginStarted}</p>
                 <p>{switchAccount ? t.oauth.browserSwitchHint : t.oauth.browserLoginHint}</p>
               </div>
+              <a
+                href={start.auth_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+              >
+                <ExternalLink className="h-3 w-3" />
+                {t.oauth.reOpenAuth}
+              </a>
               <div className="flex items-center gap-2 text-xs text-muted-foreground border-t border-border pt-3">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 {t.oauth.waitingAuth}

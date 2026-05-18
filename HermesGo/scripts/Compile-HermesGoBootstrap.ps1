@@ -6,12 +6,31 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $builderRoot = Join-Path $repoRoot "create_hermes_go"
 $sourceCs = Join-Path $builderRoot "HermesGoBootstrap.cs"
+$iconScript = Join-Path $builderRoot "scripts\New-HermesGoIcon.ps1"
 $iconPath = Join-Path $builderRoot "assets\icons\HermesGo.ico"
 $outExe = Join-Path (Split-Path -Parent $PSScriptRoot) "HermesGo.exe"
+$devAssetsDir = Join-Path (Split-Path -Parent $PSScriptRoot) "assets"
 
 if (-not (Test-Path -LiteralPath $sourceCs)) {
     throw "Missing C# source: $sourceCs"
 }
+
+if (-not (Test-Path -LiteralPath $iconScript)) {
+    throw "Missing icon generator: $iconScript"
+}
+
+Write-Host "[Compile-HermesGoBootstrap] generating icon assets"
+& powershell -NoProfile -ExecutionPolicy Bypass -File $iconScript
+if ($LASTEXITCODE -ne 0) {
+    throw "New-HermesGoIcon.ps1 failed: $LASTEXITCODE"
+}
+if (-not (Test-Path -LiteralPath $iconPath)) {
+    throw "Icon not created: $iconPath"
+}
+
+New-Item -ItemType Directory -Path (Join-Path $devAssetsDir "icons") -Force | Out-Null
+Copy-Item -LiteralPath $iconPath -Destination (Join-Path $devAssetsDir "icons\HermesGo.ico") -Force
+Copy-Item -LiteralPath (Join-Path $builderRoot "assets\HermesGo-logo.png") -Destination (Join-Path $devAssetsDir "HermesGo-logo.png") -Force
 
 $csc = $null
 foreach ($candidate in @(
@@ -52,9 +71,7 @@ $arguments = @(
     "/platform:anycpu",
     ("/out:{0}" -f $outExe)
 )
-if (Test-Path -LiteralPath $iconPath) {
-    $arguments += ("/win32icon:{0}" -f $iconPath)
-}
+$arguments += ("/win32icon:{0}" -f $iconPath)
 foreach ($referencePath in $referencePaths) {
     $arguments += ("/reference:{0}" -f $referencePath)
 }
@@ -69,3 +86,16 @@ if (-not (Test-Path -LiteralPath $outExe)) {
     throw "Output missing: $outExe"
 }
 Write-Host "[Compile-HermesGoBootstrap] OK"
+
+if ($env:HERMESGO_SKIP_TEST_SYNC -match '^(?i)(1|true|yes)$') {
+    Write-Host "[Compile-HermesGoBootstrap] test sync skipped (HERMESGO_SKIP_TEST_SYNC)"
+} else {
+    $syncPy = Join-Path (Split-Path -Parent $PSScriptRoot) "packaging_sync.py"
+    if (Test-Path -LiteralPath $syncPy) {
+        Write-Host "[Compile-HermesGoBootstrap] syncing test package from latest dist zip"
+        & py -3 $syncPy
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Test package sync failed (exit $LASTEXITCODE). Run build_zip_slim.py after a full zip build."
+        }
+    }
+}

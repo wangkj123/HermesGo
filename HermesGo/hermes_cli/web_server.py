@@ -10,12 +10,15 @@ Usage:
 """
 
 import asyncio
+from dataclasses import asdict
 import hmac
 import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -101,6 +104,89 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
 })
+
+
+class ProviderTestRequest(BaseModel):
+    provider_id: str
+    model: Optional[str] = None
+
+
+def _openai_compatible_models_url(base_url: str) -> str:
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if not url.endswith("/v1"):
+        url = url + "/v1"
+    return url + "/models"
+
+
+@app.post("/api/providers/test")
+def test_provider(body: ProviderTestRequest):
+    """Lightweight connectivity test for an inference provider.
+
+    Uses /v1/models where possible to avoid burning tokens.
+    """
+    provider_id = (body.provider_id or "").strip().lower()
+    if not provider_id:
+        raise HTTPException(status_code=400, detail="provider_id is required")
+
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        runtime = resolve_runtime_provider(requested=provider_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to resolve provider: {e}")
+
+    base_url = str(runtime.get("base_url") or "").strip()
+    api_key = str(runtime.get("api_key") or "").strip()
+    api_mode = str(runtime.get("api_mode") or "").strip()
+    provider = str(runtime.get("provider") or provider_id)
+
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Provider base_url is empty")
+    if not api_key and api_mode != "external_process":
+        raise HTTPException(status_code=400, detail="Provider API key is missing")
+
+    # Prefer /models on OpenAI-compatible providers
+    url = _openai_compatible_models_url(base_url)
+    if not url or api_mode not in ("chat_completions", "codex_responses"):
+        # Fallback: just report resolved runtime (still useful for debugging)
+        return {
+            "ok": True,
+            "provider": provider,
+            "api_mode": api_mode,
+            "base_url": base_url,
+            "note": "Resolved runtime (no /models probe for this api_mode)",
+        }
+
+    try:
+        import httpx
+
+        headers = {"Authorization": f"Bearer {api_key}"}
+        with httpx.Client(timeout=6.0, follow_redirects=True, trust_env=False) as client:
+            resp = client.get(url, headers=headers)
+            text = resp.text or ""
+            if resp.status_code >= 400:
+                snippet = text[:300]
+                raise HTTPException(status_code=502, detail=f"{resp.status_code}: {snippet}")
+            data = resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    model_count = 0
+    try:
+        model_count = len(data.get("data") or [])
+    except Exception:
+        model_count = 0
+
+    return {
+        "ok": True,
+        "provider": provider,
+        "api_mode": api_mode,
+        "base_url": base_url,
+        "models_count": model_count,
+    }
 
 
 def _require_token(request: Request) -> None:
@@ -370,6 +456,260 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
     return False, None
 
 
+def _selfext_package_root() -> Path:
+    return get_hermes_home().parent.resolve()
+
+
+def _selfext_workspace_root() -> Path:
+    package_root = _selfext_package_root()
+    for candidate in (package_root.parent.resolve(), package_root):
+        if (candidate / "SELFEXT.bat").is_file() and (candidate / "selfext").is_dir():
+            return candidate
+    return package_root
+
+
+def _selfext_manifest_path() -> Path:
+    return _selfext_workspace_root() / "selfext" / "workspace-manifest.json"
+
+
+def _selfext_start_guide_path() -> Path:
+    return _selfext_workspace_root() / "selfext" / "START-SELFEXT.md"
+
+
+def _selfext_handoff_path() -> Path:
+    return _selfext_workspace_root() / "selfext" / "SELFEXT-WORKSPACE.md"
+
+
+def _selfext_debug_log_path() -> Path:
+    return _selfext_package_root() / "HermesGo-debug.txt"
+
+
+def _read_text_if_exists(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return ""
+
+
+def _tail_lines(path: Path, limit: int = 60) -> list[str]:
+    content = _read_text_if_exists(path)
+    if not content:
+        return []
+    return content.splitlines()[-limit:]
+
+
+def _build_selfext_env() -> dict[str, str]:
+    package_root = _selfext_package_root()
+    env = dict(os.environ)
+    path_parts = [
+        str(package_root),
+        str(package_root / "runtime" / "bin"),
+        env.get("PATH", ""),
+    ]
+    env["PATH"] = ";".join(part for part in path_parts if part)
+    env["HERMES_HOME"] = str(get_hermes_home())
+    env["OLLAMA_MODELS"] = str(package_root / "data" / "ollama" / "models")
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+def _run_selfext_command(action: str, timeout_sec: int = 300) -> dict[str, Any]:
+    workspace_root = _selfext_workspace_root()
+    bat_path = workspace_root / "SELFEXT.bat"
+    if not bat_path.is_file():
+        raise FileNotFoundError(f"SELFEXT.bat not found: {bat_path}")
+
+    command = ["cmd.exe", "/c", str(bat_path), action]
+    if action == "launch":
+        command.extend(["-NoOpenBrowser", "-NoOpenChat"])
+
+    started_at = time.time()
+    completed = subprocess.run(
+        command,
+        cwd=str(workspace_root),
+        env=_build_selfext_env(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+    )
+    return {
+        "ok": completed.returncode == 0,
+        "action": action,
+        "command": command,
+        "exit_code": completed.returncode,
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+        "duration_sec": round(time.time() - started_at, 2),
+    }
+
+
+_SESSION_ID_PATTERN = re.compile(r"(?im)^session_id:\s*(?P<sid>[^\s]+)\s*$")
+
+
+def _extract_session_id(output: str) -> tuple[str, Optional[str]]:
+    match = None
+    for candidate in _SESSION_ID_PATTERN.finditer(output):
+        match = candidate
+    if match is None:
+        return output.strip(), None
+    cleaned = (output[: match.start()] + output[match.end():]).strip()
+    return cleaned, match.group("sid")
+
+
+def _run_selfext_chat(prompt: str, session_id: Optional[str], timeout_sec: int = 600) -> dict[str, Any]:
+    package_root = _selfext_package_root()
+    python_exe = package_root / "runtime" / "python311" / "python.exe"
+    if not python_exe.is_file():
+        raise FileNotFoundError(f"HermesGo python runtime not found: {python_exe}")
+
+    command = [str(python_exe), "-m", "hermes_cli.main", "chat"]
+    if session_id:
+        command.extend(["--resume", session_id])
+    command.extend(["-q", prompt, "-Q"])
+
+    started_at = time.time()
+    completed = subprocess.run(
+        command,
+        cwd=str(package_root),
+        env=_build_selfext_env(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+    )
+    response_text, parsed_session_id = _extract_session_id(completed.stdout)
+    return {
+        "ok": completed.returncode == 0,
+        "command": command,
+        "exit_code": completed.returncode,
+        "response": response_text,
+        "stderr": completed.stderr.strip(),
+        "session_id": parsed_session_id or session_id,
+        "duration_sec": round(time.time() - started_at, 2),
+    }
+
+
+def _run_chat(message: str, session_id: Optional[str], timeout_sec: int = 600) -> dict[str, Any]:
+    package_root = _selfext_package_root()
+    python_exe = package_root / "runtime" / "python311" / "python.exe"
+    if not python_exe.is_file():
+        raise FileNotFoundError(f"HermesGo python runtime not found: {python_exe}")
+
+    command = [str(python_exe), "-m", "hermes_cli.main", "chat"]
+    if session_id:
+        command.extend(["--resume", session_id])
+    command.extend(["-q", message, "-Q"])
+
+    started_at = time.time()
+    completed = subprocess.run(
+        command,
+        cwd=str(package_root),
+        env=_build_selfext_env(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+    )
+    response_text, parsed_session_id = _extract_session_id(completed.stdout)
+    return {
+        "ok": completed.returncode == 0,
+        "exit_code": completed.returncode,
+        "response": response_text,
+        "session_id": parsed_session_id or session_id,
+        "duration_sec": round(time.time() - started_at, 2),
+    }
+
+
+def _build_guided_task_prompt(
+    task_summary: str,
+    clarification_first: bool,
+    own_software_only: bool,
+    validation_scenario: Optional[str] = None,
+) -> str:
+    task_summary = task_summary.strip()
+    lines = [
+        f"这是一个 Hermes 自展目标，不是普通业务任务：{task_summary}",
+        "",
+        "SelfExt 的定义：让 HermesGo/Hermes 持续改进自身能力、控制台、运行时、任务编排、验证闭环和交付形态，直到达到我们约定的目标。",
+        "不要把用户的外部业务需求当成 SelfExt 本体；外部业务需求只能作为验收场景、测试样例或能力校准输入。",
+        "",
+    ]
+    if validation_scenario and validation_scenario.strip():
+        lines.extend(
+            [
+                f"验收场景：{validation_scenario.strip()}",
+                "",
+            ]
+        )
+    if own_software_only:
+        lines.extend(
+            [
+                "验收场景边界：如果提到注册码、激活系统或其他业务功能，只能面向我自己的软件、我自己的系统或我明确授权的项目；它们只用于验证 Hermes 自展出的能力，不是 SelfExt 要交付的业务本体。",
+                "禁止把 SelfExt 转成破解、绕过、伪造第三方授权或第三方 keygen 任务。",
+                "",
+            ]
+        )
+    if clarification_first:
+        lines.extend(
+            [
+                "先不要直接写代码，也不要直接执行。",
+                "先向我提出你必须确认的关键问题，直到需求足够清楚。",
+                "确认完以后：",
+                "1. 先给最小可行方案。",
+                "2. 把 Hermes 自展目标拆给 architect / implementer / tester / reviewer 四个角色，并说明每个角色的输入、输出、验收标准。",
+                "3. 我确认后再开始实现。",
+                "4. 每做一步就自检。",
+                "5. 失败自动回读日志、修复并重试，直到成功或出现明确阻塞。",
+                "6. 如果 dashboard run 状态变为 paused 或 cancelled，必须停在安全检查点并等待人工介入。",
+                "7. 最后给我可运行结果、验证结果和使用方法。",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "直接进入实现，但每做一步都要自检。",
+                "把 Hermes 自展目标拆给 architect / implementer / tester / reviewer 四个角色，并说明每个角色的状态。",
+                "失败自动回读日志、修复并重试，直到成功或出现明确阻塞。",
+                "如果 dashboard run 状态变为 paused 或 cancelled，必须停在安全检查点并等待人工介入。",
+                "最后给我可运行结果、验证结果和使用方法。",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
+def _looks_like_selfext_objective(goal: str) -> bool:
+    normalized = goal.strip().lower()
+    if not normalized:
+        return False
+    markers = (
+        "hermes",
+        "hermesgo",
+        "selfext",
+        "自展",
+        "控制台",
+        "dashboard",
+        "工作区",
+        "运行时",
+        "子代理",
+        "agent",
+        "任务板",
+        "验证",
+        "回读",
+        "归档",
+        "网关",
+        "gateway",
+        "runtime",
+    )
+    return any(marker in normalized for marker in markers)
+
+
 @app.get("/api/status")
 async def get_status():
     current_ver, latest_ver = check_config_version()
@@ -473,6 +813,229 @@ async def get_status():
         "gateway_updated_at": gateway_updated_at,
         "active_sessions": active_sessions,
     }
+
+
+class SelfExtActionBody(BaseModel):
+    timeout_sec: int = 300
+
+
+class SelfExtRunStartBody(BaseModel):
+    goal: str
+    validation_scenario: Optional[str] = None
+    profile_name: Optional[str] = None
+    route_tier: str = "local"
+    gateway_model_name: Optional[str] = None
+    run_id: Optional[str] = None
+
+
+class SelfExtChatBody(BaseModel):
+    prompt: str
+    session_id: Optional[str] = None
+    timeout_sec: int = 600
+
+
+class ChatBody(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    timeout_sec: int = 600
+
+
+class SelfExtPromptBody(BaseModel):
+    task_summary: str
+    validation_scenario: Optional[str] = None
+    clarification_first: bool = True
+    own_software_only: bool = False
+
+
+class SelfExtRunControlBody(BaseModel):
+    action: str
+    note: Optional[str] = None
+
+
+def _selfext_run_payload(run_id: str) -> dict[str, Any]:
+    from agent.run_registry import (
+        find_latest_checkpoint,
+        list_stage_records,
+        list_unit_records,
+        load_run_record,
+    )
+
+    run = load_run_record(run_id)
+    if run is None:
+        raise FileNotFoundError(f"Run not found: {run_id}")
+    checkpoint = find_latest_checkpoint(run_id)
+    return {
+        "run": asdict(run),
+        "stages": [asdict(stage) for stage in list_stage_records(run_id)],
+        "units": [asdict(unit) for unit in list_unit_records(run_id)],
+        "latest_checkpoint": asdict(checkpoint) if checkpoint is not None else None,
+    }
+
+
+@app.get("/api/selfext/workspace")
+async def get_selfext_workspace():
+    workspace_root = _selfext_workspace_root()
+    package_root = _selfext_package_root()
+    manifest_text = _read_text_if_exists(_selfext_manifest_path())
+    manifest_payload = {}
+    if manifest_text:
+        try:
+            manifest_payload = json.loads(manifest_text)
+        except json.JSONDecodeError:
+            manifest_payload = {"raw": manifest_text}
+
+    return {
+        "workspace_root": str(workspace_root),
+        "package_root": str(package_root),
+        "manifest": manifest_payload,
+        "start_guide": _read_text_if_exists(_selfext_start_guide_path()),
+        "handoff": _read_text_if_exists(_selfext_handoff_path()),
+        "debug_log_tail": _tail_lines(_selfext_debug_log_path(), limit=80),
+        "keys_page_path": "/env",
+        "selfext_cli_ready": (_selfext_package_root() / "runtime" / "hermes-agent" / "hermes_cli" / "selfext_commands.py").is_file(),
+    }
+
+
+@app.get("/api/selfext/runs")
+async def list_selfext_runs(limit: int = 25):
+    try:
+        from agent.run_registry import list_run_records
+
+        records = list_run_records(limit=max(1, min(limit, 100)))
+        return {
+            "runs": [_selfext_run_payload(record.run_id) for record in records],
+            "total": len(records),
+        }
+    except Exception as exc:
+        _log.exception("GET /api/selfext/runs failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/selfext/runs/{run_id}/control")
+async def control_selfext_run(run_id: str, body: SelfExtRunControlBody, request: Request):
+    _require_token(request)
+    action = body.action.strip().lower()
+    try:
+        from agent.run_registry import append_run_intervention, update_run_status
+
+        if action == "pause":
+            update_run_status(run_id, "paused", note=body.note, actor="dashboard")
+        elif action == "resume":
+            update_run_status(run_id, "running", note=body.note, actor="dashboard")
+        elif action == "cancel":
+            update_run_status(run_id, "cancelled", note=body.note, actor="dashboard")
+        elif action == "intervene":
+            message = (body.note or "").strip()
+            if not message:
+                raise HTTPException(status_code=400, detail="Intervention note is required")
+            append_run_intervention(run_id, message, actor="dashboard")
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported run control action: {action}")
+        return _selfext_run_payload(run_id)
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/selfext/runs/%s/control failed", run_id)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/selfext/actions/{action}")
+async def run_selfext_action(action: str, request: Request, body: Optional[SelfExtActionBody] = None):
+    _require_token(request)
+    supported_actions = {"doctor", "launch", "status", "readme"}
+    if action not in supported_actions:
+        raise HTTPException(status_code=400, detail=f"Unsupported selfext action: {action}")
+    try:
+        return _run_selfext_command(action, timeout_sec=(body.timeout_sec if body else 300))
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail=f"SelfExt action timed out: {exc.timeout}s")
+    except Exception as exc:
+        _log.exception("POST /api/selfext/actions/%s failed", action)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/selfext/run/start")
+async def start_selfext_run(body: SelfExtRunStartBody, request: Request):
+    _require_token(request)
+    if not _looks_like_selfext_objective(body.goal):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "SelfExt run goal must target Hermes/HermesGo self-extension. "
+                "Put external business work in validation_scenario instead."
+            ),
+        )
+    try:
+        from agent.self_extension_runtime import bootstrap_self_extension_run
+        from hermes_cli.profiles import get_active_profile_name
+
+        profile_name = body.profile_name or get_active_profile_name()
+        gateway_model_name = body.gateway_model_name or body.route_tier
+        result = bootstrap_self_extension_run(
+            goal=body.goal,
+            profile_name=profile_name,
+            route_tier=body.route_tier,
+            gateway_model_name=gateway_model_name,
+            run_id=body.run_id,
+            extra_metadata={
+                "dashboard_start_kind": "selfext_objective",
+                "validation_scenario": (body.validation_scenario or "").strip(),
+                "user_task_handling": "validation_scenario_only",
+            },
+        )
+        return asdict(result)
+    except Exception as exc:
+        _log.exception("POST /api/selfext/run/start failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/selfext/prompt")
+async def build_selfext_prompt(body: SelfExtPromptBody, request: Request):
+    _require_token(request)
+    return {
+        "prompt": _build_guided_task_prompt(
+            body.task_summary,
+            clarification_first=body.clarification_first,
+            own_software_only=body.own_software_only,
+            validation_scenario=body.validation_scenario,
+        )
+    }
+
+
+@app.post("/api/selfext/chat")
+async def run_selfext_chat(body: SelfExtChatBody, request: Request):
+    _require_token(request)
+    try:
+        return _run_selfext_chat(
+            body.prompt,
+            session_id=body.session_id,
+            timeout_sec=body.timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail=f"SelfExt chat timed out: {exc.timeout}s")
+    except Exception as exc:
+        _log.exception("POST /api/selfext/chat failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/chat")
+async def chat(body: ChatBody, request: Request):
+    _require_token(request)
+    try:
+        return _run_chat(
+            body.message,
+            session_id=body.session_id,
+            timeout_sec=body.timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail=f"Chat timed out: {exc.timeout}s")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/chat failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/sessions")
@@ -957,7 +1520,7 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     {
         "id": "openai-codex",
         "name": "OpenAI Codex (ChatGPT)",
-        "flow": "device_code",
+        "flow": "browser",
         "cli_command": "hermes auth add openai-codex",
         "docs_url": "https://platform.openai.com/docs",
         "status_fn": None,  # dispatched via auth.get_codex_auth_status
@@ -1025,7 +1588,7 @@ async def list_oauth_providers():
     Response shape (per provider):
         id              stable identifier (used in DELETE path)
         name            human label
-        flow            "pkce" | "device_code" | "external"
+        flow            "pkce" | "device_code" | "browser" | "external"
         cli_command     fallback CLI command for users to run manually
         docs_url        external docs/portal link for the "Learn more" link
         status:
@@ -1314,7 +1877,7 @@ def _submit_anthropic_pkce(session_id: str, code_input: str) -> Dict[str, Any]:
 
 
 async def _start_device_code_flow(provider_id: str) -> Dict[str, Any]:
-    """Initiate a device-code flow (Nous or OpenAI Codex).
+    """Initiate the Nous device-code flow.
 
     Calls the provider's device-auth endpoint via the existing CLI helpers,
     then spawns a background poller. Returns the user-facing display fields
@@ -1357,41 +1920,6 @@ async def _start_device_code_flow(provider_id: str) -> Dict[str, Any]:
             "verification_url": str(device_data["verification_uri_complete"]),
             "expires_in": int(device_data["expires_in"]),
             "poll_interval": int(device_data["interval"]),
-        }
-
-    if provider_id == "openai-codex":
-        # Codex uses fixed OpenAI device-auth endpoints; reuse the helper.
-        sid, _ = _new_oauth_session("openai-codex", "device_code")
-        # Use the helper but in a thread because it polls inline.
-        # We can't extract just the start step without refactoring auth.py,
-        # so we run the full helper in a worker and proxy the user_code +
-        # verification_url back via the session dict. The helper prints
-        # to stdout — we capture nothing here, just status.
-        threading.Thread(
-            target=_codex_full_login_worker, args=(sid,), daemon=True,
-            name=f"oauth-codex-{sid[:6]}",
-        ).start()
-        # Block briefly until the worker has populated the user_code, OR error.
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            with _oauth_sessions_lock:
-                s = _oauth_sessions.get(sid)
-            if s and (s.get("user_code") or s["status"] != "pending"):
-                break
-            await asyncio.sleep(0.1)
-        with _oauth_sessions_lock:
-            s = _oauth_sessions.get(sid, {})
-        if s.get("status") == "error":
-            raise HTTPException(status_code=500, detail=s.get("error_message") or "device-auth failed")
-        if not s.get("user_code"):
-            raise HTTPException(status_code=504, detail="device-auth timed out before returning a user code")
-        return {
-            "session_id": sid,
-            "flow": "device_code",
-            "user_code": s["user_code"],
-            "verification_url": s["verification_url"],
-            "expires_in": int(s.get("expires_in") or 900),
-            "poll_interval": int(s.get("interval") or 5),
         }
 
     raise HTTPException(status_code=400, detail=f"Provider {provider_id} does not support device-code flow")
@@ -1486,140 +2014,145 @@ def _nous_poller(session_id: str) -> None:
 
 
 def _codex_full_login_worker(session_id: str) -> None:
-    """Run the complete OpenAI Codex device-code flow.
-
-    Codex doesn't use the standard OAuth device-code endpoints; it has its
-    own ``/api/accounts/deviceauth/usercode`` (JSON body, returns
-    ``device_auth_id``) and ``/api/accounts/deviceauth/token`` (JSON body
-    polled until 200). On success the response carries an
-    ``authorization_code`` + ``code_verifier`` that get exchanged at
-    CODEX_OAUTH_TOKEN_URL with grant_type=authorization_code.
-
-    The flow is replicated inline (rather than calling
-    _codex_device_code_login) because that helper prints/blocks/polls in a
-    single function — we need to surface the user_code to the dashboard the
-    moment we receive it, well before polling completes.
-    """
+    """Run the complete OpenAI Codex browser OAuth flow."""
     try:
         import httpx
-        from hermes_cli.auth import (
-            CODEX_OAUTH_CLIENT_ID,
-            CODEX_OAUTH_TOKEN_URL,
-            DEFAULT_CODEX_BASE_URL,
+        import uuid as _uuid
+        from agent.credential_pool import (
+            AUTH_TYPE_OAUTH,
+            SOURCE_MANUAL,
+            PooledCredential,
+            load_pool,
         )
-        issuer = "https://auth.openai.com"
+        from hermes_cli import auth as hauth
 
-        # Step 1: request device code
-        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
-            resp = client.post(
-                f"{issuer}/api/accounts/deviceauth/usercode",
-                json={"client_id": CODEX_OAUTH_CLIENT_ID},
-                headers={"Content-Type": "application/json"},
-            )
-        if resp.status_code != 200:
-            raise RuntimeError(f"deviceauth/usercode returned {resp.status_code}")
-        device_data = resp.json()
-        user_code = device_data.get("user_code", "")
-        device_auth_id = device_data.get("device_auth_id", "")
-        poll_interval = max(3, int(device_data.get("interval", "5")))
-        if not user_code or not device_auth_id:
-            raise RuntimeError("device-code response missing user_code or device_auth_id")
-        verification_url = f"{issuer}/codex/device"
         with _oauth_sessions_lock:
             sess = _oauth_sessions.get(session_id)
-            if not sess:
-                return
-            sess["user_code"] = user_code
-            sess["verification_url"] = verification_url
-            sess["device_auth_id"] = device_auth_id
-            sess["interval"] = poll_interval
-            sess["expires_in"] = 15 * 60  # OpenAI's effective limit
-            sess["expires_at"] = time.time() + sess["expires_in"]
-
-        # Step 2: poll until authorized
-        deadline = time.time() + sess["expires_in"]
-        code_resp = None
-        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
-            while time.time() < deadline:
-                time.sleep(poll_interval)
-                poll = client.post(
-                    f"{issuer}/api/accounts/deviceauth/token",
-                    json={"device_auth_id": device_auth_id, "user_code": user_code},
-                    headers={"Content-Type": "application/json"},
-                )
-                if poll.status_code == 200:
-                    code_resp = poll.json()
-                    break
-                if poll.status_code in (403, 404):
-                    continue  # user hasn't authorized yet
-                raise RuntimeError(f"deviceauth/token poll returned {poll.status_code}")
-
-        if code_resp is None:
-            with _oauth_sessions_lock:
-                sess["status"] = "expired"
-                sess["error_message"] = "Device code expired before approval"
+        if not sess:
             return
 
-        # Step 3: exchange authorization_code for tokens
-        authorization_code = code_resp.get("authorization_code", "")
-        code_verifier = code_resp.get("code_verifier", "")
-        if not authorization_code or not code_verifier:
-            raise RuntimeError("device-auth response missing authorization_code/code_verifier")
-        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+        verifier = str(sess.get("verifier") or "").strip()
+        server = sess.get("browser_server")
+        if not verifier or server is None:
+            raise RuntimeError("browser OAuth session was not initialized")
+
+        server_thread = threading.Thread(
+            target=server.serve_forever,
+            daemon=True,
+            name=f"oauth-codex-browser-server-{session_id[:6]}",
+        )
+        server_thread.start()
+
+        if not server.login_event.wait(timeout=15 * 60):
+            raise RuntimeError("Browser login timed out after 15 minutes")
+
+        result = getattr(server, "login_result", {}) or {}
+        if result.get("status") != "approved":
+            raise RuntimeError(str(result.get("error_message") or "Browser login failed"))
+
+        code = str(result.get("code") or "").strip()
+        if not code:
+            raise RuntimeError("Browser login callback did not include an authorization code")
+
+        with httpx.Client(timeout=httpx.Timeout(15.0), headers={"Accept": "application/json"}) as client:
             token_resp = client.post(
-                CODEX_OAUTH_TOKEN_URL,
+                hauth.CODEX_OAUTH_TOKEN_URL,
                 data={
                     "grant_type": "authorization_code",
-                    "code": authorization_code,
-                    "redirect_uri": f"{issuer}/deviceauth/callback",
-                    "client_id": CODEX_OAUTH_CLIENT_ID,
-                    "code_verifier": code_verifier,
+                    "code": code,
+                    "redirect_uri": getattr(server, "redirect_uri", hauth.CODEX_BROWSER_REDIRECT_URI),
+                    "client_id": hauth.CODEX_OAUTH_CLIENT_ID,
+                    "code_verifier": verifier,
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         if token_resp.status_code != 200:
-            raise RuntimeError(f"token exchange returned {token_resp.status_code}")
+            raise RuntimeError("Token exchange returned status %s" % token_resp.status_code)
         tokens = token_resp.json()
-        access_token = tokens.get("access_token", "")
-        refresh_token = tokens.get("refresh_token", "")
-        if not access_token:
-            raise RuntimeError("token exchange did not return access_token")
+        access_token = str(tokens.get("access_token") or "").strip()
+        refresh_token = str(tokens.get("refresh_token") or "").strip()
+        if not access_token or not refresh_token:
+            raise RuntimeError("Browser login did not return both access_token and refresh_token")
 
-        # Persist via credential pool — same shape as auth_commands.add_command
-        from agent.credential_pool import (
-            PooledCredential,
-            load_pool,
-            AUTH_TYPE_OAUTH,
-            SOURCE_MANUAL,
-        )
-        import uuid as _uuid
         pool = load_pool("openai-codex")
+        try:
+            existing_entries = list(pool.entries())
+        except Exception:
+            existing_entries = []
+        for index in range(len(existing_entries), 0, -1):
+            try:
+                if getattr(existing_entries[index - 1], "provider", "") == "openai-codex":
+                    pool.remove_index(index)
+            except Exception:
+                pass
         base_url = (
             os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
-            or DEFAULT_CODEX_BASE_URL
+            or hauth.DEFAULT_CODEX_BASE_URL
         )
         entry = PooledCredential(
             provider="openai-codex",
             id=_uuid.uuid4().hex[:6],
-            label="dashboard device_code",
+            label="dashboard browser",
             auth_type=AUTH_TYPE_OAUTH,
             priority=0,
-            source=f"{SOURCE_MANUAL}:dashboard_device_code",
+            source=f"{SOURCE_MANUAL}:dashboard_browser",
             access_token=access_token,
             refresh_token=refresh_token,
             base_url=base_url,
+            extra={"auth_mode": "chatgpt-browser"},
         )
         pool.add_entry(entry)
         with _oauth_sessions_lock:
-            sess["status"] = "approved"
-        _log.info("oauth/device: openai-codex login completed (session=%s)", session_id)
+            sess = _oauth_sessions.get(session_id)
+            if sess:
+                sess["status"] = "approved"
+                sess["error_message"] = None
+        _log.info("oauth/browser: openai-codex login completed (session=%s)", session_id)
     except Exception as e:
-        _log.warning("codex device-code worker failed (session=%s): %s", session_id, e)
+        _log.warning("codex browser OAuth worker failed (session=%s): %s", session_id, e)
         with _oauth_sessions_lock:
             s = _oauth_sessions.get(session_id)
             if s:
                 s["status"] = "error"
                 s["error_message"] = str(e)
+
+
+async def _start_codex_browser_flow() -> Dict[str, Any]:
+    """Initiate the OpenAI Codex browser OAuth flow."""
+    from hermes_cli import auth as hauth
+
+    verifier, challenge = hauth._generate_codex_pkce()
+    state = secrets.token_urlsafe(24)
+    server = hauth._start_codex_browser_login_server(state)
+    auth_url = hauth._build_codex_browser_auth_url(
+        challenge,
+        state,
+        getattr(server, "redirect_uri", hauth.CODEX_BROWSER_REDIRECT_URI),
+    )
+
+    sid, sess = _new_oauth_session("openai-codex", "browser")
+    sess["verifier"] = verifier
+    sess["state"] = state
+    sess["auth_url"] = auth_url
+    sess["browser_server"] = server
+    sess["expires_in"] = 15 * 60
+    sess["expires_at"] = time.time() + (15 * 60)
+    sess["interval"] = 2
+
+    threading.Thread(
+        target=_codex_full_login_worker,
+        args=(sid,),
+        daemon=True,
+        name=f"oauth-codex-browser-{sid[:6]}",
+    ).start()
+
+    return {
+        "session_id": sid,
+        "flow": "browser",
+        "auth_url": auth_url,
+        "expires_in": 15 * 60,
+        "poll_interval": 2,
+    }
 
 
 @app.post("/api/providers/oauth/{provider_id}/start")
@@ -1639,6 +2172,8 @@ async def start_oauth_login(provider_id: str, request: Request):
     try:
         if catalog_entry["flow"] == "pkce":
             return _start_anthropic_pkce()
+        if catalog_entry["flow"] == "browser":
+            return await _start_codex_browser_flow()
         if catalog_entry["flow"] == "device_code":
             return await _start_device_code_flow(provider_id)
     except HTTPException:
@@ -2317,6 +2852,7 @@ def start_server(
     port: int = 9119,
     open_browser: bool = True,
     allow_public: bool = False,
+    embedded_chat: bool = False,  # accepted for compatibility with newer main.py
 ):
     """Start the web UI server."""
     import uvicorn

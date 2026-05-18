@@ -24,6 +24,7 @@ internal static class Program
     {
         try
         {
+            ConfigureTransportSecurity();
             var bootstrap = new HermesBootstrap(AppContext.BaseDirectory, args);
             bootstrap.RunAsync().GetAwaiter().GetResult();
             return 0;
@@ -32,8 +33,12 @@ internal static class Program
         {
             try
             {
+                var bootstrapLogRoot = Directory.Exists(Path.Combine(AppContext.BaseDirectory, "app"))
+                    ? Path.Combine(AppContext.BaseDirectory, "app", "logs", "update")
+                    : Path.Combine(AppContext.BaseDirectory, "logs", "update");
+                Directory.CreateDirectory(bootstrapLogRoot);
                 File.AppendAllText(
-                    Path.Combine(AppContext.BaseDirectory, "logs", "update", "HermesGo-bootstrap.log"),
+                    Path.Combine(bootstrapLogRoot, "HermesGo-bootstrap.log"),
                     string.Format("[{0:yyyy-MM-dd HH:mm:ss}] fatal: {1}{2}", DateTime.Now, ex, Environment.NewLine),
                     Encoding.UTF8);
             }
@@ -45,14 +50,31 @@ internal static class Program
             return 1;
         }
     }
+
+    private static void ConfigureTransportSecurity()
+    {
+        try
+        {
+            var tls12 = (SecurityProtocolType)3072;
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls | SecurityProtocolType.Tls11 | tls12;
+        }
+        catch
+        {
+            // Keep startup working even if the runtime does not expose every protocol flag.
+        }
+    }
 }
 
 internal sealed class HermesBootstrap
 {
     private const int SwRestore = 9;
-    private const string Repo = "NousResearch/hermes-agent";
-    private const string AssetName = "HermesGo.zip";
+    private const string Repo = "wangkj123/HermesGo";
+    private const string AssetName = "HermesGo-green-3ui-slim.zip";
+    private const string AutoUpdateEnv = "HERMESGO_AUTO_UPDATE";
+    private const string AutoUpdatePromptEnv = "HERMESGO_AUTO_UPDATE_PROMPT";
+    private const string AutoUpdateSilentEnv = "HERMESGO_AUTO_UPDATE_SILENT";
     private const string LocalVersionOverrideEnv = "HERMESGO_LOCAL_VERSION_OVERRIDE";
+    private const string LocalReleaseTagOverrideEnv = "HERMESGO_LOCAL_RELEASE_TAG_OVERRIDE";
     private const string ForceUpdateEnv = "HERMESGO_FORCE_UPDATE";
     private const string SkipUpdateEnv = "HERMESGO_SKIP_UPDATE";
     private const string UpdateVersionEnv = "HERMESGO_UPDATE_VERSION";
@@ -68,6 +90,9 @@ internal sealed class HermesBootstrap
     private const int ChunkSizeBytes = 512 * 1024;
 
     private readonly string _root;
+    private readonly string _contentRoot;
+    private readonly string _scriptsDir;
+    private readonly string _toolsDir;
     private readonly string[] _args;
     private readonly string _pythonExe;
     private readonly string _runtimeDir;
@@ -77,90 +102,197 @@ internal sealed class HermesBootstrap
     private readonly string _logPath;
     private readonly string _tmpRoot;
     private readonly string _historyPath;
+    private readonly bool _planOnly;
+    private readonly bool _backgroundMaintenance;
+    private readonly bool _applyUpdateNow;
+    private readonly bool _showMenu;
+    private readonly List<CommandPlanEntry> _planEntries = new List<CommandPlanEntry>();
+    private readonly HashSet<int> _launchedProcessIds = new HashSet<int>();
+    private readonly object _launchedProcessLock = new object();
+    private bool _shutdownRequested;
 
     public HermesBootstrap(string root, string[] args)
     {
+        var rawArgs = args ?? new string[0];
         _root = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        _args = args ?? new string[0];
-        _pythonExe = Path.Combine(_root, "runtime", "python311", "python.exe");
-        _runtimeDir = Path.Combine(_root, "runtime", "hermes-agent");
-        _runtimeBinDir = Path.Combine(_root, "runtime", "bin");
-        _homeDir = Path.Combine(_root, "home");
-        _ollamaModelsDir = Path.Combine(_root, "data", "ollama", "models");
-        _logPath = Path.Combine(_root, "logs", "update", "HermesGo-bootstrap.log");
-        _tmpRoot = Path.Combine(_root, "logs", "update", "_tmp");
-        _historyPath = Path.Combine(_root, "logs", "update", "HermesGo-source-history.log");
+        _contentRoot = ResolvePackageContentRoot(_root);
+        _scriptsDir = Path.Combine(_contentRoot, "scripts");
+        _toolsDir = Path.Combine(_contentRoot, "tools");
+        _planOnly = HasPlanOnlyFlag(rawArgs) ||
+            ReadBoolEnv("HERMESGO_DRY_RUN", defaultValue: false) ||
+            ReadBoolEnv("HERMESGO_PLAN_ONLY", defaultValue: false) ||
+            ReadBoolEnv("HERMESGO_DEBUG_PLAN", defaultValue: false);
+        _backgroundMaintenance = HasBackgroundMaintenanceFlag(rawArgs);
+        _applyUpdateNow = HasApplyUpdateNowFlag(rawArgs);
+        _showMenu = HasMenuFlag(rawArgs);
+        _args = rawArgs
+            .Where(arg => !IsPlanOnlyFlag(arg) && !IsBackgroundMaintenanceFlag(arg) && !IsApplyUpdateNowFlag(arg) && !IsMenuFlag(arg))
+            .ToArray();
+        _pythonExe = Path.Combine(_contentRoot, "runtime", "python311", "python.exe");
+        _runtimeDir = Path.Combine(_contentRoot, "runtime", "hermes-agent");
+        _runtimeBinDir = Path.Combine(_contentRoot, "runtime", "bin");
+        _homeDir = Path.Combine(_contentRoot, "home");
+        _ollamaModelsDir = Path.Combine(_contentRoot, "data", "ollama", "models");
+        _logPath = Path.Combine(_contentRoot, "logs", "update", "HermesGo-bootstrap.log");
+        _tmpRoot = Path.Combine(Path.GetTempPath(), "hg");
+        _historyPath = Path.Combine(_contentRoot, "logs", "update", "HermesGo-source-history.log");
+    }
+
+    private static bool HasPlanOnlyFlag(IEnumerable<string> args)
+    {
+        return args != null && args.Any(IsPlanOnlyFlag);
+    }
+
+    private static bool IsPlanOnlyFlag(string arg)
+    {
+        return string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(arg, "--plan-only", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(arg, "--debug-plan", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasBackgroundMaintenanceFlag(IEnumerable<string> args)
+    {
+        return args != null && args.Any(IsBackgroundMaintenanceFlag);
+    }
+
+    private static bool IsBackgroundMaintenanceFlag(string arg)
+    {
+        return string.Equals(arg, "--background-maintenance", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasApplyUpdateNowFlag(IEnumerable<string> args)
+    {
+        return args != null && args.Any(IsApplyUpdateNowFlag);
+    }
+
+    private static bool IsApplyUpdateNowFlag(string arg)
+    {
+        return string.Equals(arg, "--apply-update-now", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(arg, "--self-update-now", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasMenuFlag(IEnumerable<string> args)
+    {
+        return args != null && args.Any(IsMenuFlag);
+    }
+
+    private static bool IsMenuFlag(string arg)
+    {
+        return string.Equals(arg, "--menu", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(arg, "/menu", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ResolvePackageContentRoot(string packageRoot)
+    {
+        var appRoot = Path.Combine(packageRoot, "app");
+        return Directory.Exists(appRoot) ? appRoot : packageRoot;
     }
 
     public async Task RunAsync()
     {
         EnsureDirectories();
-        CleanupTempArtifacts();
 
-        if (IsSkipped())
+        if (_backgroundMaintenance)
         {
-            Log("update skipped by environment");
-            LaunchEntryPoint();
+            await RunBackgroundMaintenanceAsync().ConfigureAwait(false);
             return;
         }
 
-        var localVersion = GetLocalVersion();
-        var targetVersion = await ResolveTargetVersionAsync().ConfigureAwait(false);
-        if (targetVersion == null)
+        if (_applyUpdateNow)
         {
-            Log("target version unavailable; launching package without update");
-            LaunchEntryPoint();
+            await RunApplyUpdateNowAsync().ConfigureAwait(false);
             return;
         }
 
-        if (!ShouldUpdate(localVersion, targetVersion))
+        if (ShouldUseDirectLaunch())
         {
-            Log("package already at " + localVersion + "; launching without update");
-            LaunchEntryPoint();
+            await TryAutoUpdateBeforeLaunchAsync().ConfigureAwait(false);
+            LaunchPackage(_args);
             return;
         }
-
-        Log("update needed: local=" + localVersion + ", target=" + targetVersion);
-
-        var sources = BuildSources(targetVersion);
-        if (sources.Count == 0)
-        {
-            Log("no update sources configured; launching package without update");
-            LaunchEntryPoint();
-            return;
-        }
-
-        if (!ContainsFileSource(sources) && ContainsHttpSources(sources))
-        {
-            if (!await HasNetworkAsync(sources).ConfigureAwait(false))
-            {
-                Log("network probe failed; launching package without update");
-                LaunchEntryPoint();
-                return;
-            }
-        }
-
-        var result = await DownloadConsensusAsync(sources, targetVersion).ConfigureAwait(false);
-        if (result == null)
-        {
-            Log("no valid update package found; launching package without update");
-            LaunchEntryPoint();
-            return;
-        }
-
-        var extractedRoot = ExtractPackage(result.ZipPath, targetVersion);
-        if (extractedRoot == null)
-        {
-            Log("downloaded package failed validation; launching package without update");
-            LaunchEntryPoint();
-            return;
-        }
-
-        ApplyUpdate(extractedRoot);
-        CleanupTempArtifacts();
-        Log("update applied from " + result.SourceLabel + " (" + result.Md5 + ")");
 
         LaunchEntryPoint();
+    }
+
+    private bool ShouldUseDirectLaunch()
+    {
+        if (ShouldSkipLauncher())
+        {
+            return true;
+        }
+
+        if (_showMenu)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private async Task TryAutoUpdateBeforeLaunchAsync()
+    {
+        if (IsSkipped() || !ReadBoolEnv(AutoUpdateEnv, defaultValue: true))
+        {
+            return;
+        }
+
+        try
+        {
+            var localTag = GetLocalReleaseTag();
+            var release = await ResolveTargetReleaseAsync().ConfigureAwait(false);
+            if (release == null || !ShouldUpdateRelease(localTag, release))
+            {
+                return;
+            }
+
+            var targetText = release.AgentVersion != null
+                ? release.AgentVersion.ToString()
+                : (!string.IsNullOrWhiteSpace(release.DisplayName) ? release.DisplayName : release.TagName);
+
+            if (ReadBoolEnv(AutoUpdateSilentEnv, defaultValue: false) || !Environment.UserInteractive)
+            {
+                Log("auto update before launch (silent)");
+                var silentResult = await ApplyReleaseUpdateAsync(release).ConfigureAwait(false);
+                if (!silentResult.Success)
+                {
+                    Log("auto update before launch failed: " + silentResult.Message);
+                }
+
+                return;
+            }
+
+            if (ReadBoolEnv(AutoUpdatePromptEnv, defaultValue: true))
+            {
+                var prompt = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "发现 HermesGo 新版本：{0}{1}{1}是否现在下载并覆盖程序文件？{1}会保留 home、data、logs 目录。{1}{1}选择“稍后”将直接启动当前版本。",
+                    targetText,
+                    Environment.NewLine);
+                if (!ShowPrimaryDeferPrompt("HermesGo 自动更新", prompt, "立即更新", "稍后"))
+                {
+                    return;
+                }
+            }
+
+            Log("auto update before launch (interactive)");
+            var result = await ApplyReleaseUpdateAsync(release).ConfigureAwait(false);
+            if (!result.Success)
+            {
+                Log("auto update before launch failed: " + result.Message);
+                if (Environment.UserInteractive)
+                {
+                    MessageBox.Show(
+                        result.Message,
+                        "HermesGo 自动更新失败",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("auto update before launch exception: " + ex.Message);
+        }
     }
 
     private void EnsureDirectories()
@@ -184,7 +316,7 @@ internal sealed class HermesBootstrap
             return overrideVersion;
         }
 
-        var versionFile = Path.Combine(_root, "runtime", "hermes-agent", "hermes_cli", "__init__.py");
+        var versionFile = Path.Combine(_runtimeDir, "hermes_cli", "__init__.py");
         if (!File.Exists(versionFile))
         {
             return new Version(0, 0, 0);
@@ -200,6 +332,47 @@ internal sealed class HermesBootstrap
         var versionText = StripVersionPrefix(match.Groups["v"].Value.Trim());
         Version parsed;
         return Version.TryParse(versionText, out parsed) ? parsed : new Version(0, 0, 0);
+    }
+
+    private string GetLocalReleaseTag()
+    {
+        var overrideValue = Environment.GetEnvironmentVariable(LocalReleaseTagOverrideEnv);
+        if (!string.IsNullOrWhiteSpace(overrideValue))
+        {
+            Log("local release tag override: " + overrideValue.Trim());
+            return overrideValue.Trim();
+        }
+
+        var candidates = new[]
+        {
+            Path.Combine(_root, "README.txt"),
+            Path.Combine(_root, "README.md"),
+            Path.Combine(_contentRoot, "docs", "README.md"),
+        };
+
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                if (!File.Exists(candidate))
+                {
+                    continue;
+                }
+
+                var content = File.ReadAllText(candidate, Encoding.UTF8);
+                var match = Regex.Match(content, @"Current release tag:\s*`?(?<tag>[^\r\n`]+)`?", RegexOptions.IgnoreCase);
+                if (match.Success)
+                {
+                    return match.Groups["tag"].Value.Trim();
+                }
+            }
+            catch
+            {
+                // Try the next local metadata file.
+            }
+        }
+
+        return string.Empty;
     }
 
     private async Task<Version> ResolveTargetVersionAsync()
@@ -268,7 +441,398 @@ internal sealed class HermesBootstrap
         return targetVersion > localVersion;
     }
 
-    private List<UpdateSource> BuildSources(Version targetVersion)
+    private bool ShouldPromptBeforeUpdate()
+    {
+        return _args.Length == 0 &&
+               Environment.UserInteractive &&
+               !ShouldSkipLauncher() &&
+               !ReadBoolEnv(ForceUpdateEnv, defaultValue: false);
+    }
+
+    private bool PromptForUpdate(Version localVersion, Version targetVersion)
+    {
+        var currentText = localVersion != null ? localVersion.ToString() : "unknown";
+        var latestText = targetVersion != null ? targetVersion.ToString() : "unknown";
+        var message = string.Format(
+            "检测到 Hermes 新版本。\r\n\r\n当前版本：{0}\r\n最新版本：{1}\r\n\r\n是否现在升级并继续启动？",
+            currentText,
+            latestText);
+
+        return ShowPrimaryDeferPrompt(
+            "HermesGo 版本更新",
+            message,
+            "更新并启动",
+            "推迟");
+    }
+
+    private bool PromptForCloudConfiguration(string displayName)
+    {
+        var nameText = string.IsNullOrWhiteSpace(displayName) ? "Cloud: GPT-5.4 Mini" : displayName;
+        var message = string.Format(
+            "{0} 需要先完成 OpenAI 登录配置。\r\n\r\n现在会打开浏览器登录页，登录成功后会自动回到启动流程。\r\n\r\n是否现在开始配置？",
+            nameText);
+
+        return ShowPrimaryDeferPrompt(
+            "HermesGo 云端配置",
+            message,
+            "开始登录",
+            "推迟");
+    }
+
+    private static bool ShowPrimaryDeferPrompt(string title, string message, string primaryText, string deferText)
+    {
+        using (var form = new Form())
+        {
+            form.Text = title;
+            form.StartPosition = FormStartPosition.CenterScreen;
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.ClientSize = new Size(440, 190);
+            form.Font = SystemFonts.MessageBoxFont;
+
+            var messageLabel = new Label
+            {
+                AutoSize = false,
+                Left = 18,
+                Top = 18,
+                Width = 404,
+                Height = 112,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Text = message ?? string.Empty,
+            };
+
+            var buttons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 52,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false,
+                Padding = new Padding(0, 8, 14, 10),
+            };
+
+            var primaryButton = new Button
+            {
+                Text = primaryText,
+                Width = 112,
+                Height = 30,
+                DialogResult = DialogResult.OK,
+                Margin = new Padding(8, 0, 0, 0),
+            };
+
+            var deferButton = new Button
+            {
+                Text = deferText,
+                Width = 92,
+                Height = 30,
+                DialogResult = DialogResult.Cancel,
+                Margin = new Padding(8, 0, 0, 0),
+            };
+
+            buttons.Controls.Add(primaryButton);
+            buttons.Controls.Add(deferButton);
+            form.Controls.Add(messageLabel);
+            form.Controls.Add(buttons);
+            form.AcceptButton = primaryButton;
+            form.CancelButton = deferButton;
+
+            return form.ShowDialog() == DialogResult.OK;
+        }
+    }
+
+    private async Task<List<ReleaseInfo>> ResolveTargetReleasesAsync()
+    {
+        var overrideValue = Environment.GetEnvironmentVariable(UpdateVersionEnv);
+        if (!string.IsNullOrWhiteSpace(overrideValue))
+        {
+            var tag = overrideValue.Trim();
+            Log("target release override: " + tag);
+            return new List<ReleaseInfo>
+            {
+                new ReleaseInfo
+                {
+                    TagName = tag,
+                    DisplayName = tag,
+                    ZipAssetNames = new List<string>(),
+                    ZipAssetUrls = new List<string>(),
+                },
+            };
+        }
+
+        string probeFailure = null;
+        try
+        {
+            using (var client = CreateHttpClient())
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, string.Format("https://api.github.com/repos/{0}/releases?per_page=10", Repo));
+                request.Headers.UserAgent.ParseAdd("HermesGoBootstrap/1.0");
+                request.Headers.Accept.ParseAdd("application/vnd.github+json");
+                request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
+
+                using (var response = await client.SendAsync(request).ConfigureAwait(false))
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        throw new InvalidOperationException("HermesGo release list probe failed: " + response.StatusCode);
+                    }
+
+                    var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var serializer = new JavaScriptSerializer();
+                    var payload = serializer.DeserializeObject(json) as object[];
+                    if (payload == null)
+                    {
+                        throw new InvalidOperationException("HermesGo release list payload was not an array");
+                    }
+
+                    var releases = new List<ReleaseInfo>();
+                    foreach (var item in payload)
+                    {
+                        var releasePayload = item as Dictionary<string, object>;
+                        if (releasePayload == null || !releasePayload.ContainsKey("tag_name"))
+                        {
+                            continue;
+                        }
+
+                        bool isDraft = releasePayload.ContainsKey("draft") && Convert.ToBoolean(releasePayload["draft"], CultureInfo.InvariantCulture);
+                        bool isPrerelease = releasePayload.ContainsKey("prerelease") && Convert.ToBoolean(releasePayload["prerelease"], CultureInfo.InvariantCulture);
+                        if (isDraft || isPrerelease)
+                        {
+                            continue;
+                        }
+
+                        var release = new ReleaseInfo
+                        {
+                            TagName = Convert.ToString(releasePayload["tag_name"], CultureInfo.InvariantCulture),
+                            DisplayName = releasePayload.ContainsKey("name") ? Convert.ToString(releasePayload["name"], CultureInfo.InvariantCulture) : string.Empty,
+                            Body = releasePayload.ContainsKey("body") ? Convert.ToString(releasePayload["body"], CultureInfo.InvariantCulture) : string.Empty,
+                            SourceZipUrl = releasePayload.ContainsKey("zipball_url") ? Convert.ToString(releasePayload["zipball_url"], CultureInfo.InvariantCulture) : string.Empty,
+                            ZipAssetNames = new List<string>(),
+                            ZipAssetUrls = new List<string>(),
+                        };
+                        release.AgentVersion = ParseAgentVersion(release.DisplayName, release.Body, release.TagName);
+
+                        object assetsValue;
+                        if (releasePayload.TryGetValue("assets", out assetsValue))
+                        {
+                            var assets = assetsValue as object[];
+                            if (assets != null)
+                            {
+                                foreach (var assetValue in assets)
+                                {
+                                    var asset = assetValue as Dictionary<string, object>;
+                                    if (asset == null)
+                                    {
+                                        continue;
+                                    }
+
+                                    var name = asset.ContainsKey("name") ? Convert.ToString(asset["name"], CultureInfo.InvariantCulture) : string.Empty;
+                                    var url = asset.ContainsKey("browser_download_url") ? Convert.ToString(asset["browser_download_url"], CultureInfo.InvariantCulture) : string.Empty;
+                                    if (string.IsNullOrWhiteSpace(name) || !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        continue;
+                                    }
+
+                                    release.ZipAssetNames.Add(name);
+                                    if (!string.IsNullOrWhiteSpace(url))
+                                    {
+                                        release.ZipAssetUrls.Add(url);
+                                    }
+                                }
+                            }
+                        }
+
+                        releases.Add(release);
+                    }
+
+                    NormalizeAndSortReleases(releases);
+                    Log("Hermes release list from GitHub: " + releases.Count);
+                    return releases;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            probeFailure = ex.Message;
+        }
+
+        if (!string.IsNullOrWhiteSpace(probeFailure))
+        {
+            Log("Hermes release list probe failed: " + probeFailure);
+            var atomFallback = await ResolveTargetReleasesFromAtomAsync().ConfigureAwait(false);
+            if (atomFallback != null && atomFallback.Count > 0)
+            {
+                return atomFallback;
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<List<ReleaseInfo>> ResolveTargetReleasesFromAtomAsync()
+    {
+        try
+        {
+            using (var client = CreateHttpClient())
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, string.Format("https://github.com/{0}/releases.atom", Repo));
+                request.Headers.UserAgent.ParseAdd("HermesGoBootstrap/1.0");
+
+                using (var response = await client.SendAsync(request).ConfigureAwait(false))
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Log("Hermes release atom probe failed: " + response.StatusCode);
+                        return null;
+                    }
+
+                    var xml = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var entries = Regex.Matches(xml, @"<entry>(?<body>.*?)</entry>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var releases = new List<ReleaseInfo>();
+                    foreach (Match entry in entries)
+                    {
+                        var body = entry.Groups["body"].Value;
+                        var titleMatch = Regex.Match(body, @"<title[^>]*>(?<v>.*?)</title>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                        var linkMatch = Regex.Match(body, @"<link[^>]*href=""(?<v>[^""]+)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                        if (!titleMatch.Success || !linkMatch.Success)
+                        {
+                            continue;
+                        }
+
+                        var title = WebUtility.HtmlDecode(titleMatch.Groups["v"].Value).Trim();
+                        var link = linkMatch.Groups["v"].Value.Trim();
+                        var tagMatch = Regex.Match(link, @"/releases/tag/(?<tag>[^/?#]+)", RegexOptions.IgnoreCase);
+                        var tag = tagMatch.Success ? tagMatch.Groups["tag"].Value.Trim() : string.Empty;
+                        var release = new ReleaseInfo
+                        {
+                            TagName = tag,
+                            DisplayName = title,
+                            Body = string.Empty,
+                            SourceZipUrl = string.IsNullOrWhiteSpace(tag)
+                                ? string.Empty
+                                : string.Format("https://github.com/{0}/archive/refs/tags/{1}.zip", Repo, tag),
+                            ZipAssetNames = new List<string>(),
+                            ZipAssetUrls = new List<string>(),
+                        };
+                        release.AgentVersion = ParseAgentVersion(release.DisplayName, release.Body, release.TagName);
+                        releases.Add(release);
+                    }
+
+                    Log("Hermes release list from GitHub Atom: " + releases.Count);
+                    return releases;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("Hermes release atom probe failed: " + ex.Message);
+            return null;
+        }
+    }
+
+    private async Task<ReleaseInfo> ResolveTargetReleaseAsync()
+    {
+        var releases = await ResolveTargetReleasesAsync().ConfigureAwait(false);
+        return releases != null && releases.Count > 0 ? releases[0] : null;
+    }
+
+    private static Version ParseAgentVersion(params string[] values)
+    {
+        foreach (var value in values)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            var match = Regex.Match(value, @"\bv(?<v>\d+\.\d+\.\d+)\b", RegexOptions.IgnoreCase);
+            if (!match.Success)
+            {
+                continue;
+            }
+
+            Version version;
+            if (Version.TryParse(match.Groups["v"].Value, out version))
+            {
+                return version;
+            }
+        }
+
+        return null;
+    }
+
+    private bool ShouldUpdateRelease(string localTag, ReleaseInfo targetRelease)
+    {
+        if (ReadBoolEnv(ForceUpdateEnv, defaultValue: false))
+        {
+            Log("force update enabled");
+            return true;
+        }
+
+        if (targetRelease == null)
+        {
+            return false;
+        }
+
+        var localVersion = GetLocalVersion();
+        if (targetRelease.AgentVersion != null)
+        {
+            return targetRelease.AgentVersion > localVersion;
+        }
+
+        return !string.Equals(localTag ?? string.Empty, targetRelease.TagName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<UpdateResult> ApplyReleaseUpdateAsync(ReleaseInfo targetRelease, Action<string> progressReporter = null)
+    {
+        if (targetRelease == null)
+        {
+            return UpdateResult.Failed("没有可用的新发行版信息。");
+        }
+
+        var sources = BuildSources(targetRelease);
+        if (sources.Count == 0)
+        {
+            Log("no update sources configured; update aborted");
+            return UpdateResult.Failed("没有找到可下载的发行版 zip。");
+        }
+
+        if (!ContainsFileSource(sources) && ContainsHttpSources(sources))
+        {
+            ReportUpdateProgress(progressReporter, "正在探测更新源...");
+            if (!await HasNetworkAsync(sources).ConfigureAwait(false))
+            {
+                Log("network probe failed; update aborted");
+                return UpdateResult.Failed("网络探测失败，未开始下载。");
+            }
+        }
+
+        ReportUpdateProgress(progressReporter, "正在下载并校验更新包...");
+        var result = await DownloadConsensusAsync(sources, targetRelease.TagName).ConfigureAwait(false);
+        if (result == null)
+        {
+            Log("no valid update package found; update aborted");
+            return UpdateResult.Failed("没有下载到有效的发行版 zip。");
+        }
+
+        ReportUpdateProgress(progressReporter, "正在解包更新包...");
+        var extractedRoot = ExtractPackage(result.ZipPath, targetRelease.TagName);
+        if (extractedRoot == null)
+        {
+            Log("downloaded package failed validation; update aborted");
+            return UpdateResult.Failed("下载的 HermesGo 便携包结构校验失败，未覆盖当前文件。");
+        }
+
+        ReportUpdateProgress(progressReporter, "正在覆盖 HermesGo 便携包文件...");
+        ApplyUpdate(extractedRoot);
+        ReportUpdateProgress(progressReporter, "正在清理临时文件...");
+        CleanupTempArtifacts();
+        Log("package update applied from " + result.SourceLabel + " (" + result.Md5 + ")");
+        var summaryText = "便携包已更新到 " + targetRelease.TagName + "。";
+        return UpdateResult.Successful(result.SourceLabel, result.Md5, result.Bytes, summaryText);
+    }
+
+    private List<UpdateSource> BuildSources(ReleaseInfo targetRelease)
     {
         var configured = Environment.GetEnvironmentVariable(UpdateSourcesEnv);
         if (!string.IsNullOrWhiteSpace(configured))
@@ -283,22 +847,130 @@ internal sealed class HermesBootstrap
             return entries;
         }
 
-        var version = targetVersion.ToString();
-        var tag = "v" + version;
-        var owner = "NousResearch";
-        var project = "hermes-agent";
-        var candidates = new List<UpdateSource>
+        var tag = targetRelease != null ? targetRelease.TagName : string.Empty;
+        var assetNames = GetPreferredPackageAssetNames(targetRelease);
+        var candidates = new List<UpdateSource>();
+
+        if (ReadBoolEnv("HERMESGO_UPDATE_INCLUDE_SOURCE", defaultValue: false))
         {
-            new UpdateSource(string.Format("https://mirrors.aliyun.com/github/releases/{0}/{1}/{2}/{3}", owner, project, tag, AssetName), "aliyun-versioned"),
-            new UpdateSource(string.Format("https://mirrors.aliyun.com/github/releases/{0}/{1}/LatestRelease/{2}", owner, project, AssetName), "aliyun-latest"),
-            new UpdateSource(string.Format("https://mirrors.tuna.tsinghua.edu.cn/github-release/{0}/{1}/{2}/{3}", owner, project, tag, AssetName), "tuna-versioned"),
-            new UpdateSource(string.Format("https://mirrors.tuna.tsinghua.edu.cn/github-release/{0}/{1}/LatestRelease/{2}", owner, project, AssetName), "tuna-latest"),
-            new UpdateSource(string.Format("https://github.com/{0}/releases/download/{1}/{2}", Repo, tag, AssetName), "github-versioned"),
-            new UpdateSource(string.Format("https://github.com/{0}/releases/latest/download/{1}", Repo, AssetName), "github-latest"),
-        };
+            if (targetRelease != null && !string.IsNullOrWhiteSpace(targetRelease.SourceZipUrl))
+            {
+                candidates.Add(new UpdateSource(targetRelease.SourceZipUrl, "github-source-zipball"));
+            }
+
+            if (!string.IsNullOrWhiteSpace(tag))
+            {
+                candidates.Add(new UpdateSource(string.Format("https://github.com/{0}/archive/refs/tags/{1}.zip", Repo, tag), "github-source-archive"));
+            }
+        }
+
+        foreach (var assetName in assetNames)
+        {
+            candidates.Add(new UpdateSource(string.Format("https://github.com/{0}/releases/download/{1}/{2}", Repo, tag, assetName), "github-versioned-" + assetName));
+        }
+
+        if (targetRelease != null && targetRelease.ZipAssetUrls != null)
+        {
+            foreach (var url in targetRelease.ZipAssetUrls)
+            {
+                candidates.Add(new UpdateSource(url, "github-asset-api"));
+            }
+        }
 
         Log("default update sources: " + candidates.Count);
         return candidates;
+    }
+
+    private static List<string> GetPreferredPackageAssetNames(ReleaseInfo targetRelease)
+    {
+        if (targetRelease == null || targetRelease.ZipAssetNames == null || targetRelease.ZipAssetNames.Count == 0)
+        {
+            return new List<string> { AssetName };
+        }
+
+        OrderPackageZipAssets(targetRelease);
+        var preferred = targetRelease.ZipAssetNames
+            .Where(name => ScorePackageAsset(name) >= 0)
+            .ToList();
+        return preferred.Count > 0 ? preferred : new List<string>(targetRelease.ZipAssetNames);
+    }
+
+    private static void NormalizeAndSortReleases(List<ReleaseInfo> releases)
+    {
+        if (releases == null || releases.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var release in releases)
+        {
+            OrderPackageZipAssets(release);
+        }
+
+        releases.Sort(delegate(ReleaseInfo left, ReleaseInfo right)
+        {
+            var leftVersion = left != null && left.AgentVersion != null ? left.AgentVersion : new Version(0, 0, 0);
+            var rightVersion = right != null && right.AgentVersion != null ? right.AgentVersion : new Version(0, 0, 0);
+            return rightVersion.CompareTo(leftVersion);
+        });
+    }
+
+    private static void OrderPackageZipAssets(ReleaseInfo release)
+    {
+        if (release == null || release.ZipAssetNames == null || release.ZipAssetNames.Count == 0)
+        {
+            return;
+        }
+
+        var pairs = new List<KeyValuePair<string, string>>();
+        for (var index = 0; index < release.ZipAssetNames.Count; index++)
+        {
+            var name = release.ZipAssetNames[index];
+            var url = release.ZipAssetUrls != null && index < release.ZipAssetUrls.Count
+                ? release.ZipAssetUrls[index]
+                : string.Empty;
+            pairs.Add(new KeyValuePair<string, string>(name, url));
+        }
+
+        pairs.Sort((left, right) => ScorePackageAsset(right.Key).CompareTo(ScorePackageAsset(left.Key)));
+        release.ZipAssetNames = pairs.Select(pair => pair.Key).ToList();
+        release.ZipAssetUrls = pairs.Select(pair => pair.Value).Where(url => !string.IsNullOrWhiteSpace(url)).ToList();
+    }
+
+    private static int ScorePackageAsset(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            return -100;
+        }
+
+        var lower = name.ToLowerInvariant();
+        var score = 0;
+        if (lower.Contains("hermesgo"))
+        {
+            score += 10;
+        }
+
+        if (lower.Contains("green") && lower.Contains("3ui"))
+        {
+            score += 40;
+        }
+        else if (lower.Contains("3ui"))
+        {
+            score += 20;
+        }
+
+        if (lower.Contains("slim"))
+        {
+            score += 15;
+        }
+
+        if (lower.Contains("hermes-agent") || lower.Contains("source"))
+        {
+            score -= 60;
+        }
+
+        return score;
     }
 
     private bool ContainsHttpSources(IEnumerable<UpdateSource> sources)
@@ -357,10 +1029,15 @@ internal sealed class HermesBootstrap
         return client;
     }
 
-    private async Task<DownloadConsensus> DownloadConsensusAsync(IReadOnlyCollection<UpdateSource> sources, Version targetVersion)
+    private async Task<DownloadConsensus> DownloadConsensusAsync(IReadOnlyCollection<UpdateSource> sources, string targetReleaseTag)
     {
         Directory.CreateDirectory(_tmpRoot);
-        var tempDir = Path.Combine(_tmpRoot, string.Format("download-{0:yyyyMMddHHmmssfff}-{1:N}", DateTime.UtcNow, Guid.NewGuid()));
+        var tempDir = Path.Combine(
+            _tmpRoot,
+            string.Format(
+                "d-{0:yyyyMMddHHmmssfff}-{1}",
+                DateTime.UtcNow,
+                Guid.NewGuid().ToString("N").Substring(0, 8)));
         Directory.CreateDirectory(tempDir);
 
         var probes = await ProbeSourcesAsync(sources).ConfigureAwait(false);
@@ -404,7 +1081,7 @@ internal sealed class HermesBootstrap
             Log("adaptive chunked download unavailable or failed; falling back to ranked full downloads");
             foreach (var probe in ranked)
             {
-                var result = await DownloadOneAsync(probe.Source, targetVersion, tempDir, 0).ConfigureAwait(false);
+                var result = await DownloadOneAsync(probe.Source, targetReleaseTag, tempDir, 0).ConfigureAwait(false);
                 if (result.Success)
                 {
                     Log("download ok: " + result.SourceLabel + " md5=" + result.Md5 + " size=" + result.Bytes);
@@ -665,7 +1342,7 @@ internal sealed class HermesBootstrap
         return -1;
     }
 
-    private async Task<DownloadResult> DownloadOneAsync(UpdateSource source, Version targetVersion, string tempDir, int index)
+    private async Task<DownloadResult> DownloadOneAsync(UpdateSource source, string targetReleaseTag, string tempDir, int index)
     {
         var dest = Path.Combine(tempDir, string.Format("{0:00}-{1}.zip", index, SanitizeFileName(source.Label)));
         var attempts = 3;
@@ -775,9 +1452,14 @@ internal sealed class HermesBootstrap
         }
     }
 
-    private string ExtractPackage(string zipPath, Version targetVersion)
+    private string ExtractPackage(string zipPath, string targetReleaseTag)
     {
-        var stagingDir = Path.Combine(_tmpRoot, string.Format("extract-{0:yyyyMMddHHmmssfff}-{1:N}", DateTime.UtcNow, Guid.NewGuid()));
+        var stagingDir = Path.Combine(
+            _tmpRoot,
+            string.Format(
+                "e-{0:yyyyMMddHHmmssfff}-{1}",
+                DateTime.UtcNow,
+                Guid.NewGuid().ToString("N").Substring(0, 8)));
         Directory.CreateDirectory(stagingDir);
 
         try
@@ -818,12 +1500,64 @@ internal sealed class HermesBootstrap
                 return null;
             }
 
-            Log("staged package ready for " + targetVersion);
+            Log("staged package ready for " + targetReleaseTag);
             return root;
         }
         catch (Exception ex)
         {
             Log("package extraction failed: " + ex.Message);
+            SafeDeleteDirectory(stagingDir);
+            return null;
+        }
+    }
+
+    private string ExtractHermesSourcePackage(string zipPath, string targetReleaseTag)
+    {
+        var stagingDir = Path.Combine(
+            _tmpRoot,
+            string.Format(
+                "s-{0:yyyyMMddHHmmssfff}-{1}",
+                DateTime.UtcNow,
+                Guid.NewGuid().ToString("N").Substring(0, 8)));
+        Directory.CreateDirectory(stagingDir);
+
+        try
+        {
+            using (var archive = ZipFile.OpenRead(zipPath))
+            {
+                foreach (var entry in archive.Entries)
+                {
+                    if (string.IsNullOrWhiteSpace(entry.FullName))
+                    {
+                        continue;
+                    }
+
+                    var normalized = entry.FullName.Replace('\\', '/').TrimStart('/');
+                    if (normalized.EndsWith("/", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var destination = Path.Combine(stagingDir, normalized.Replace('/', Path.DirectorySeparatorChar));
+                    Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? stagingDir);
+                    entry.ExtractToFile(destination, overwrite: true);
+                }
+            }
+
+            var root = FindExtractedRoot(stagingDir);
+            if (root == null || !ValidateHermesSourceRoot(root))
+            {
+                Log("extracted Hermes source root failed validation");
+                SafeDeleteDirectory(stagingDir);
+                return null;
+            }
+
+            Log("staged Hermes source ready for " + targetReleaseTag);
+            return root;
+        }
+        catch (Exception ex)
+        {
+            Log("Hermes source extraction failed: " + ex.Message);
             SafeDeleteDirectory(stagingDir);
             return null;
         }
@@ -844,24 +1578,161 @@ internal sealed class HermesBootstrap
 
     private bool ValidatePackageRoot(string packageRoot)
     {
+        var contentRoot = ResolvePackageContentRoot(packageRoot);
         var required = new[]
         {
-            Path.Combine(packageRoot, "HermesGo.exe"),
-            Path.Combine(packageRoot, "HermesGo.bat"),
-            Path.Combine(packageRoot, "Start-HermesGo.ps1"),
-            Path.Combine(packageRoot, "runtime", "hermes-agent", "hermes_cli", "__init__.py"),
+            Path.Combine(contentRoot, "scripts", "Start-HermesGo.ps1"),
+            Path.Combine(contentRoot, "runtime", "python311", "python.exe"),
+            Path.Combine(contentRoot, "runtime", "hermes-agent", "hermes_cli", "__init__.py"),
+        };
+
+        if (!required.All(File.Exists))
+        {
+            return false;
+        }
+
+        return File.Exists(Path.Combine(packageRoot, "HermesGo.exe")) ||
+            File.Exists(Path.Combine(contentRoot, "HermesGo.exe"));
+    }
+
+    private bool ValidateHermesSourceRoot(string sourceRoot)
+    {
+        var required = new[]
+        {
+            Path.Combine(sourceRoot, "pyproject.toml"),
+            Path.Combine(sourceRoot, "run_agent.py"),
+            Path.Combine(sourceRoot, "hermes_cli", "__init__.py"),
         };
 
         return required.All(File.Exists);
     }
 
+    private sealed class UpdateSummary
+    {
+        public int CopiedFiles { get; set; }
+        public int PrunedItems { get; set; }
+        public List<string> SamplePaths { get; private set; }
+
+        public UpdateSummary()
+        {
+            SamplePaths = new List<string>();
+        }
+    }
+
+    private UpdateSummary ApplyHermesSourceUpdate(string sourceRoot)
+    {
+        var summary = new UpdateSummary();
+        var skipDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".git",
+            ".github",
+            ".venv",
+            "venv",
+            "node_modules",
+            "web",
+            "__pycache__",
+        };
+        var protectedPortableFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "hermes_cli/auth.py",
+            "hermes_cli/auth_commands.py",
+            "hermes_cli/main.py",
+            "hermes_cli/web_server.py",
+        };
+
+        foreach (var file in Directory.GetFiles(sourceRoot, "*", SearchOption.AllDirectories))
+        {
+            var relative = GetRelativePath(sourceRoot, file);
+            var normalized = relative.Replace('\\', '/');
+            var parts = normalized.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Any(part => skipDirectories.Contains(part)))
+            {
+                continue;
+            }
+
+            if (protectedPortableFiles.Contains(normalized))
+            {
+                continue;
+            }
+
+            if (normalized.EndsWith(".pyc", StringComparison.OrdinalIgnoreCase) ||
+                normalized.EndsWith(".pyo", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var destination = Path.Combine(_runtimeDir, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? _runtimeDir);
+            File.Copy(file, destination, overwrite: true);
+            summary.CopiedFiles++;
+            if (summary.SamplePaths.Count < 10)
+            {
+                summary.SamplePaths.Add(normalized);
+            }
+        }
+
+        summary.PrunedItems = PrunePortableRuntimeAfterSourceUpdate();
+        return summary;
+    }
+
+    private int PrunePortableRuntimeAfterSourceUpdate()
+    {
+        var pathsToRemove = new[]
+        {
+            Path.Combine(_runtimeDir, "web"),
+            Path.Combine(_runtimeDir, "node_modules"),
+            Path.Combine(_runtimeDir, "tests"),
+            Path.Combine(_runtimeDir, "scripts"),
+            Path.Combine(_runtimeDir, "hermes_agent.egg-info"),
+            Path.Combine(_runtimeDir, "README.md"),
+            Path.Combine(_runtimeDir, "LICENSE"),
+            Path.Combine(_runtimeDir, "MANIFEST.in"),
+            Path.Combine(_runtimeDir, "package.json"),
+            Path.Combine(_runtimeDir, "package-lock.json"),
+            Path.Combine(_runtimeDir, "pyproject.toml"),
+            Path.Combine(_runtimeDir, "requirements.txt"),
+            Path.Combine(_runtimeDir, "uv.lock"),
+            Path.Combine(_runtimeDir, ".env.example"),
+            Path.Combine(_runtimeDir, "cli-config.yaml.example"),
+            Path.Combine(_runtimeDir, "hermes"),
+        };
+
+        var removed = 0;
+        foreach (var path in pathsToRemove)
+        {
+            if (Directory.Exists(path))
+            {
+                SafeDeleteDirectory(path);
+                removed++;
+            }
+            else if (File.Exists(path))
+            {
+                TryDeleteFile(path);
+                removed++;
+            }
+        }
+
+        foreach (var dir in Directory.GetDirectories(_runtimeDir, "__pycache__", SearchOption.AllDirectories))
+        {
+            SafeDeleteDirectory(dir);
+            removed++;
+        }
+
+        Log("portable runtime prune after source update: removed=" + removed.ToString(CultureInfo.InvariantCulture));
+        return removed;
+    }
+
     private void ApplyUpdate(string extractedRoot)
     {
+        var extractedContentRoot = ResolvePackageContentRoot(extractedRoot);
+        var contentPrefix = GetRelativePath(extractedRoot, extractedContentRoot)
+            .Replace('\\', '/')
+            .Trim('/');
         var preserveRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "home",
-            "data",
-            "logs",
+            string.IsNullOrEmpty(contentPrefix) ? "home" : contentPrefix + "/home",
+            string.IsNullOrEmpty(contentPrefix) ? "data" : contentPrefix + "/data",
+            string.IsNullOrEmpty(contentPrefix) ? "logs" : contentPrefix + "/logs",
         };
 
         foreach (var file in Directory.GetFiles(extractedRoot, "*", SearchOption.AllDirectories))
@@ -883,11 +1754,62 @@ internal sealed class HermesBootstrap
         }
     }
 
+    private static string BuildUpdateSummaryText(UpdateSummary summary)
+    {
+        if (summary == null)
+        {
+            return "未生成更新摘要。";
+        }
+
+        var lines = new List<string>
+        {
+            "覆盖文件数：" + summary.CopiedFiles.ToString(CultureInfo.InvariantCulture),
+            "清理项数：" + summary.PrunedItems.ToString(CultureInfo.InvariantCulture),
+        };
+
+        if (summary.SamplePaths != null && summary.SamplePaths.Count > 0)
+        {
+            lines.Add("示例文件：");
+            foreach (var sample in summary.SamplePaths)
+            {
+                lines.Add("- " + sample);
+            }
+        }
+
+        return string.Join(Environment.NewLine, lines.ToArray());
+    }
+
+    private void ReportUpdateProgress(Action<string> progressReporter, string message)
+    {
+        Log(message);
+        if (progressReporter == null)
+        {
+            return;
+        }
+
+        try
+        {
+            progressReporter(message);
+        }
+        catch
+        {
+            // Best effort only.
+        }
+    }
+
     private bool ShouldSkipPath(string relativePath, HashSet<string> preserveRoots)
     {
-        var normalized = relativePath.Replace('\\', '/');
-        var top = normalized.Split('/').FirstOrDefault() ?? string.Empty;
-        return preserveRoots.Contains(top);
+        var normalized = relativePath.Replace('\\', '/').Trim('/');
+        foreach (var preserveRoot in preserveRoots)
+        {
+            if (normalized.Equals(preserveRoot, StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith(preserveRoot + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private bool IsSelfExe(string relativePath)
@@ -953,6 +1875,30 @@ internal sealed class HermesBootstrap
 
         using (var form = new LauncherForm(launcherState))
         {
+            form.FullLaunchRequested += delegate
+            {
+                RunLauncherActionAsync(form, delegate
+                {
+                    LaunchPackage(new string[0]);
+                    return true;
+                });
+            };
+            form.WebUiOnlyRequested += delegate
+            {
+                RunLauncherActionAsync(form, delegate
+                {
+                    LaunchWebUiOnly();
+                    return true;
+                });
+            };
+            form.DesktopOnlyRequested += delegate
+            {
+                RunLauncherActionAsync(form, delegate
+                {
+                    LaunchDesktopOnly();
+                    return true;
+                });
+            };
             form.BeginnerRequested += delegate
             {
                 RunLauncherActionAsync(form, HandleBeginnerLaunch);
@@ -977,32 +1923,410 @@ internal sealed class HermesBootstrap
             {
                 RunLauncherActionAsync(form, HandleCodexLoginLaunch);
             };
+            form.UiSuiteLaunchRequested += delegate(object sender, LauncherForm.UiSuiteSelection selection)
+            {
+                RunLauncherActionAsync(form, delegate
+                {
+                    return HandleUiSuiteSelectionLaunch(selection);
+                });
+            };
             form.OpenHomeRequested += delegate
             {
-                OpenFolder(_homeDir);
-                form.Close();
+                RunLauncherActionAsync(form, delegate
+                {
+                    OpenFolder(_homeDir);
+                    return true;
+                });
             };
             form.OpenLogsRequested += delegate
             {
-                OpenFolder(Path.Combine(_root, "logs"));
-                form.Close();
+                RunLauncherActionAsync(form, delegate
+                {
+                    OpenFolder(Path.Combine(_contentRoot, "logs"));
+                    return true;
+                });
             };
             form.OpenCustomActionsRequested += delegate
             {
-                OpenTextFile(Path.Combine(_homeDir, "launcher-actions.txt"));
-                form.Close();
+                RunLauncherActionAsync(form, delegate
+                {
+                    OpenTextFile(Path.Combine(_homeDir, "launcher-actions.txt"));
+                    return true;
+                });
             };
-            form.CustomActionRequested += delegate (object sender, LauncherForm.LauncherOption option)
+            form.CustomActionRequested += delegate(object sender, LauncherForm.LauncherOption option)
             {
-                RunLauncherActionAsync(form, delegate { return HandleCustomLauncherAction(option); });
+                RunLauncherActionAsync(form, delegate
+                {
+                    return HandleCustomLauncherAction(option);
+                });
             };
             form.ExitRequested += delegate
             {
+                ShutdownLaunchedProcesses();
                 form.Close();
             };
+            form.FormClosing += delegate
+            {
+                ShutdownLaunchedProcesses();
+            };
+            form.UpdateRequested += delegate
+            {
+                var release = form.PendingUpdate;
+                if (release == null)
+                {
+                    StartBackgroundUpdateCheck(form, false);
+                    return;
+                }
+
+                var currentVersion = GetLocalVersion();
+                var currentVersionText = currentVersion != null ? currentVersion.ToString() : "unknown";
+                var targetVersionText = release.AgentVersion != null ? release.AgentVersion.ToString() : (!string.IsNullOrWhiteSpace(release.DisplayName) ? release.DisplayName : release.TagName);
+                            form.SetUpdateStatus("当前版本 " + currentVersionText + "，目标版本 " + targetVersionText + "，正在下载并覆盖 HermesGo 便携包...", false, false, release);
+                RunLauncherActionAsync(form, delegate
+                {
+                    Action<string> progressReporter = delegate(string message)
+                    {
+                        if (!form.IsHandleCreated)
+                        {
+                            return;
+                        }
+
+                        try
+                        {
+                            form.BeginInvoke(new Action(delegate
+                            {
+                                form.SetUpdateStatus(message, false, false, release);
+                            }));
+                        }
+                        catch
+                        {
+                            // Best effort only.
+                        }
+                    };
+
+                    var updateResult = ApplyReleaseUpdateAsync(release, progressReporter).GetAwaiter().GetResult();
+                    form.BeginInvoke(new Action(delegate
+                    {
+                        if (updateResult.Success)
+                        {
+                            var summaryText = string.IsNullOrWhiteSpace(updateResult.Summary) ? "未生成更新摘要。" : updateResult.Summary;
+                            form.SetUpdateStatus("当前版本 " + targetVersionText + "，更新完成。请关闭后重新打开 HermesGo.exe 使用新版。", true, false, release);
+                            MessageBox.Show(
+                                form,
+                                "当前版本：" + currentVersionText + "\r\n目标版本：" + targetVersionText + "\r\n\r\nHermesGo 便携包已覆盖更新。\r\n\r\n来源：" + updateResult.SourceLabel + "\r\nMD5：" + updateResult.Md5 + "\r\n\r\n更新摘要：\r\n" + summaryText + "\r\n\r\n请重新打开 HermesGo.exe。",
+                                "HermesGo 更新完成",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information);
+                        }
+                        else
+                        {
+                            form.SetUpdateStatus("更新失败：" + updateResult.Message, true, true, release);
+                            MessageBox.Show(
+                                form,
+                                updateResult.Message,
+                                "HermesGo 更新失败",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+                        }
+                    }));
+                    return false;
+                });
+            };
+
+            if (_planOnly)
+            {
+                form.SetUpdateStatus("当前为 dry-run/plan-only 模式：只生成命令计划，不执行启动和更新检查。", true, false, null);
+            }
+            else
+            {
+                form.SetAvailableUpdateReleases(new List<ReleaseInfo>());
+                form.SetUpdateStatus("启动器已就绪。", true, false, null);
+                form.Shown += delegate
+                {
+                    LaunchBackgroundMaintenanceProcess();
+                    StartBackgroundUpdateCheck(form, true);
+                };
+            }
 
             Application.Run(form);
         }
+    }
+
+    private async Task RunBackgroundMaintenanceAsync()
+    {
+        Log("background maintenance started");
+
+        CleanupTempArtifacts();
+
+        if (!IsSkipped())
+        {
+            try
+            {
+                var localVersion = GetLocalVersion();
+                var localTag = GetLocalReleaseTag();
+                var releases = await ResolveTargetReleasesAsync().ConfigureAwait(false);
+                var available = releases != null
+                    ? releases.Where(release => ShouldUpdateRelease(localTag, release)).ToList()
+                    : new List<ReleaseInfo>();
+                Log("background maintenance update probe: local=" + localVersion + ", releases=" + (releases != null ? releases.Count : 0) + ", available=" + available.Count);
+            }
+            catch (Exception ex)
+            {
+                Log("background maintenance update probe failed: " + ex.Message);
+            }
+        }
+        else
+        {
+            Log("background maintenance update probe skipped by environment");
+        }
+
+        Log("background maintenance finished");
+    }
+
+    private async Task RunApplyUpdateNowAsync()
+    {
+        Log("apply update now started");
+
+        if (IsSkipped())
+        {
+            Log("apply update now skipped by environment");
+            return;
+        }
+
+        var localVersion = GetLocalVersion();
+        var localTag = GetLocalReleaseTag();
+        var release = await ResolveTargetReleaseAsync().ConfigureAwait(false);
+        if (release == null)
+        {
+            Log("apply update now found no target release");
+            return;
+        }
+
+        if (!ShouldUpdateRelease(localTag, release))
+        {
+            Log("apply update now found no newer release: local=" + localVersion + ", target=" + release.TagName);
+            return;
+        }
+
+        var result = await ApplyReleaseUpdateAsync(release).ConfigureAwait(false);
+        if (!result.Success)
+        {
+            Log("apply update now failed: " + result.Message);
+            throw new InvalidOperationException(result.Message);
+        }
+
+        Log("apply update now succeeded: source=" + result.SourceLabel + ", md5=" + result.Md5 + ", bytes=" + result.Bytes.ToString(CultureInfo.InvariantCulture) + ", summary=" + (result.Summary ?? string.Empty).Replace(Environment.NewLine, " | "));
+    }
+
+    private void LaunchBackgroundMaintenanceProcess()
+    {
+        if (_planOnly || _backgroundMaintenance)
+        {
+            return;
+        }
+
+        try
+        {
+            var exePath = Process.GetCurrentProcess().MainModule.FileName;
+            var psi = new ProcessStartInfo
+            {
+                FileName = exePath,
+                Arguments = "--background-maintenance",
+                WorkingDirectory = _root,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            };
+
+            TrackLaunchedProcess(Process.Start(psi));
+            Log("background maintenance process launched");
+        }
+        catch (Exception ex)
+        {
+            Log("background maintenance launch failed: " + ex.Message);
+        }
+    }
+
+    private void TrackLaunchedProcess(Process process)
+    {
+        if (process == null)
+        {
+            return;
+        }
+
+        TrackLaunchedProcessId(process.Id);
+    }
+
+    private void TrackLaunchedProcessId(int processId)
+    {
+        if (processId <= 0)
+        {
+            return;
+        }
+
+        if (processId == Process.GetCurrentProcess().Id)
+        {
+            return;
+        }
+
+        lock (_launchedProcessLock)
+        {
+            _launchedProcessIds.Add(processId);
+        }
+    }
+
+    private void ShutdownLaunchedProcesses()
+    {
+        int[] processIds;
+        lock (_launchedProcessLock)
+        {
+            if (_shutdownRequested)
+            {
+                return;
+            }
+
+            _shutdownRequested = true;
+            processIds = _launchedProcessIds.Where(processId => processId > 0).Distinct().ToArray();
+        }
+
+        if (processIds.Length == 0)
+        {
+            Log("shutdown requested, no tracked child processes were found");
+            return;
+        }
+
+        Log("shutdown requested, tracked child process ids: " + string.Join(", ", processIds.Select(id => id.ToString(CultureInfo.InvariantCulture)).ToArray()));
+        foreach (var processId in processIds)
+        {
+            KillProcessTree(processId);
+        }
+    }
+
+    private void KillProcessTree(int processId)
+    {
+        if (processId <= 0 || processId == Process.GetCurrentProcess().Id)
+        {
+            return;
+        }
+
+        try
+        {
+            var taskkillPath = Path.Combine(Environment.SystemDirectory, "taskkill.exe");
+            if (!File.Exists(taskkillPath))
+            {
+                taskkillPath = "taskkill.exe";
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = taskkillPath,
+                Arguments = "/F /T /PID " + processId.ToString(CultureInfo.InvariantCulture),
+                WorkingDirectory = _root,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            };
+
+            using (var taskkill = Process.Start(psi))
+            {
+                if (taskkill != null)
+                {
+                    taskkill.WaitForExit(10000);
+                }
+            }
+
+            Log("requested process tree shutdown: PID " + processId.ToString(CultureInfo.InvariantCulture));
+        }
+        catch (Exception ex)
+        {
+            Log("failed to shut down PID " + processId.ToString(CultureInfo.InvariantCulture) + ": " + ex.Message);
+        }
+    }
+
+    private void StartBackgroundUpdateCheck(LauncherForm form, bool notifyWhenAvailable)
+    {
+        if (form == null)
+        {
+            return;
+        }
+
+        if (IsSkipped())
+        {
+            form.SetUpdateStatus("启动器已就绪。", true, false, null);
+            return;
+        }
+
+        form.SetUpdateStatus("正在后台检查 Hermes 官方更新...", false, false, null);
+        Task.Run(async () =>
+        {
+            try
+            {
+                var localVersion = GetLocalVersion();
+                var currentVersionText = localVersion != null ? localVersion.ToString() : "unknown";
+                var localTag = GetLocalReleaseTag();
+                var releases = await ResolveTargetReleasesAsync().ConfigureAwait(false);
+                var available = releases != null
+                    ? releases.Where(release => ShouldUpdateRelease(localTag, release)).ToList()
+                    : new List<ReleaseInfo>();
+                if (form.IsDisposed)
+                {
+                    return;
+                }
+
+                form.BeginInvoke(new Action(delegate
+                {
+                    if (releases == null)
+                    {
+                        form.SetAvailableUpdateReleases(new List<ReleaseInfo>());
+                        form.SetUpdateStatus("启动器已就绪。", true, false, null);
+                        return;
+                    }
+
+                    form.SetAvailableUpdateReleases(available);
+
+                    if (available.Count > 0)
+                    {
+                        var selected = available[0];
+                        var latestText = !string.IsNullOrWhiteSpace(selected.DisplayName) ? selected.DisplayName : selected.TagName;
+                        if (available.Count > 1)
+                        {
+                            form.SetUpdateStatus("当前版本 " + currentVersionText + "，发现 " + available.Count + " 个官网版本，先自己选目标版本，再点“更新”。", true, true, null);
+                        }
+                        else
+                        {
+                            form.SetUpdateStatus("当前版本 " + currentVersionText + "，发现 HermesGo " + latestText + "，可从官网覆盖更新。", true, true, selected);
+                        }
+
+                        if (notifyWhenAvailable)
+                        {
+                            MessageBox.Show(
+                                form,
+                                "当前版本：" + currentVersionText + "\r\n发现可用更新：" + latestText + "\r\n\r\n可在窗口底部点击“更新”下载并覆盖 HermesGo 便携包（保留 home/data/logs）。",
+                                "HermesGo 发现更新",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information);
+                        }
+                    }
+                    else
+                    {
+                        form.SetUpdateStatus("启动器已就绪。", true, false, null);
+                    }
+                }));
+            }
+            catch (Exception ex)
+            {
+                Log("foreground background update check failed: " + ex.Message);
+                if (!form.IsDisposed)
+                {
+                    form.BeginInvoke(new Action(delegate
+                    {
+                        form.SetAvailableUpdateReleases(new List<ReleaseInfo>());
+                        form.SetUpdateStatus("启动器已就绪。", true, false, null);
+                    }));
+                }
+            }
+        });
     }
 
     private void RunLauncherActionAsync(LauncherForm form, Func<bool> action)
@@ -1017,10 +2341,17 @@ internal sealed class HermesBootstrap
 
         Task.Run(() =>
         {
-            var shouldClose = false;
             try
             {
-                shouldClose = action();
+                action();
+                if (_planOnly && _planEntries.Count > 0)
+                {
+                    WriteLauncherGuidance(
+                        "HermesGo 调试计划已生成",
+                        "当前是 dry-run/plan-only 模式，未执行实际命令。" + Environment.NewLine + Environment.NewLine +
+                        "JSON: " + GetExePlanJsonPath() + Environment.NewLine +
+                        "命令: " + GetExePlanScriptPath());
+                }
             }
             catch (Exception ex)
             {
@@ -1035,10 +2366,6 @@ internal sealed class HermesBootstrap
                     {
                         form.UseWaitCursor = false;
                         form.Enabled = true;
-                        if (shouldClose && !form.IsDisposed)
-                        {
-                            form.Close();
-                        }
                     }));
                 }
             }
@@ -1051,6 +2378,13 @@ internal sealed class HermesBootstrap
 
     private bool HandleBeginnerLaunch()
     {
+        if (_planOnly)
+        {
+            AddConfigPlanEntry("apply-local-preset", "ollama", "gemma:2b", "http://127.0.0.1:11434/v1");
+            LaunchPackage(new string[0]);
+            return true;
+        }
+
         ApplyLocalPreset();
         LaunchPackage(new string[0]);
         return true;
@@ -1066,44 +2400,104 @@ internal sealed class HermesBootstrap
 
     private bool HandleCloudLaunch(string model, string baseUrl, string browserUrl)
     {
-        var state = GetLauncherState();
-        var loggedInDuringThisLaunch = false;
-        if (!state.HasCodexAuth)
+        var cloudDisplayName = string.Equals(model, "gpt-5.4-mini", StringComparison.OrdinalIgnoreCase)
+            ? "Cloud: GPT-5.4 Mini"
+            : "Cloud: " + (string.IsNullOrWhiteSpace(model) ? "openai-codex" : model);
+        if (_planOnly)
         {
-            if (!HandleCodexLoginLaunch())
-            {
-                return false;
-            }
-
-            loggedInDuringThisLaunch = true;
-            state = GetLauncherState();
-            if (!state.HasCodexAuth)
-            {
-                WriteLauncherGuidance(
-                    "Codex 登录未成功",
-                    "当前还没有可用的 openai-codex 凭据，请先完成登录后再点“Cloud: GPT-5.4 Mini”。");
-                return false;
-            }
+            AddConfigPlanEntry("apply-cloud-preset", "openai-codex", model, baseUrl);
+            LaunchPackage(new[] {
+                "-NoOpenBrowser",
+                "-OAuthProvider", "openai-codex",
+                "-ChatProvider", "openai-codex",
+                "-ChatModel", model
+            });
+            OpenUrl(browserUrl);
+            return true;
         }
 
-        ApplyConfigPreset("openai-codex", model, baseUrl);
-        LaunchPackage(new[] { "-NoOpenBrowser", "-OAuthProvider", "openai-codex" });
+        var state = GetLauncherState();
+        if (!state.HasCodexAuth)
+        {
+            if (!PromptForCloudConfiguration(cloudDisplayName))
+            {
+                return false;
+            }
 
+            if (!PrepareCloudPreset(model, baseUrl))
+            {
+                return false;
+            }
+
+            LaunchPackage(new[] {
+                "-NoOpenBrowser",
+                "-NoOpenChat",
+                "-OAuthProvider", "openai-codex",
+                "-ChatProvider", "openai-codex",
+                "-ChatModel", model
+            });
+
+            if (!OpenCloudDashboardOrWarn(browserUrl))
+            {
+                return false;
+            }
+
+            WriteLauncherGuidance(
+                "需要完成 OpenAI 登录",
+                "已经打开 Dashboard 的 OpenAI 登录页。请在浏览器里完成登录；登录成功后再回到启动器重新点“启动”。");
+            Log("Cloud 启动暂停 - 未检测到有效 OpenAI 授权，已打开 dashboard 登录页。");
+            return true;
+        }
+
+        if (!PrepareCloudPreset(model, baseUrl))
+        {
+            return false;
+        }
+
+        LaunchPackage(new[] {
+            "-NoOpenBrowser",
+            "-OAuthProvider", "openai-codex",
+            "-ChatProvider", "openai-codex",
+            "-ChatModel", model
+        });
+
+        if (!OpenCloudDashboardOrWarn(browserUrl))
+        {
+            return false;
+        }
+
+        Log("Cloud 启动已完成 - 已确认 OpenAI 登录状态并打开 dashboard。");
+        return true;
+    }
+
+    private bool PrepareCloudPreset(string model, string baseUrl)
+    {
+        ApplyConfigPreset("openai-codex", model, baseUrl);
+        var updatedState = GetLauncherState();
+        if (!string.Equals(updatedState.Provider, "openai-codex", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(updatedState.Model, model, StringComparison.OrdinalIgnoreCase))
+        {
+            WriteLauncherGuidance(
+                "云端模型配置未生效",
+                "启动器已经尝试写入 openai-codex / " + model + "，但重新读取配置后仍不是这个组合。请检查 home\\config.yaml 和日志。");
+            Log("cloud preset verification failed after write: provider=" + updatedState.Provider + ", model=" + updatedState.Model);
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool OpenCloudDashboardOrWarn(string browserUrl)
+    {
         if (!WaitForUrlReady(browserUrl, TimeSpan.FromSeconds(45)))
         {
             WriteLauncherGuidance(
                 "Dashboard 未就绪",
-                "后台已经启动，但 Dashboard 还没有准备好。请先检查日志，或者稍后再点“Cloud: GPT-5.4 Mini”。");
+                "后台已经启动，但 Dashboard 还没有准备好。请先检查日志，或者稍后再重新点“启动”。");
             return false;
         }
 
         OpenUrl(browserUrl);
-        if (loggedInDuringThisLaunch)
-        {
-            ClosePreviousBrowserTabIfNeeded();
-        }
-
-        Log("Cloud 启动已完成 - 已确认 Codex 登录状态并打开 dashboard。");
         return true;
     }
 
@@ -1120,7 +2514,7 @@ internal sealed class HermesBootstrap
         {
             WriteLauncherGuidance(
                 "本地模型切换未完成",
-                "切换脚本没有正常结束。请先完成本地模型配置，再重新选择“Utility: Switch Local Model”。");
+                "切换脚本没有正常结束。请先完成本地模型配置，再重新选择“Switch Model”。");
             return false;
         }
 
@@ -1128,26 +2522,153 @@ internal sealed class HermesBootstrap
         return true;
     }
 
-    private bool HandleVerifyLaunch()
-    {
-        LaunchBatchScript("Verify-HermesGo.bat");
-        return true;
-    }
-
-        private bool HandleCodexLoginLaunch()
+        private bool HandleVerifyLaunch()
         {
-            if (HasValidCodexAuth())
+            LaunchBatchScript("Verify-HermesGo.bat");
+            return true;
+        }
+
+        private bool HandleUiSuiteSelectionLaunch(LauncherForm.UiSuiteSelection selection)
+        {
+            if (selection == null || selection.Ui == null)
             {
-                Log("Codex 登录已就绪 - 跳过登录流程，直接继续启动。");
+                WriteLauncherGuidance(
+                    "UI 套件选择无效",
+                    "请先在 UI 套件区选择一个 UI，再点顶部启动按钮。");
+                return false;
+            }
+
+            var ui = selection.Ui;
+            var uiId = (ui.Id ?? string.Empty).Trim();
+
+            if (string.IsNullOrWhiteSpace(uiId))
+            {
+                WriteLauncherGuidance(
+                    "UI 套件选择无效",
+                    "所选 UI 缺少编号，请重新选择。");
+                return false;
+            }
+
+            if (!TryApplyUiSuitePreset(selection.MainAction))
+            {
+                return false;
+            }
+
+            var arguments = new List<string>
+            {
+                "-Ids",
+                uiId,
+            };
+
+            if (!selection.AutoOpenBrowser)
+            {
+                arguments.Add("-NoOpenBrowser");
+            }
+
+            if (!selection.AutoOpenChat)
+            {
+                arguments.Add("-NoOpenChat");
+            }
+
+            LaunchBatchScript("Start-HermesGoUiSuite.ps1", arguments.ToArray(), visible: false);
+            return true;
+        }
+
+        private bool TryApplyUiSuitePreset(LauncherForm.LauncherOption option)
+        {
+            if (option == null)
+            {
                 return true;
             }
 
-            var exitCode = RunBlockingCodexLoginCommand("login");
+            if (string.Equals(option.Key, "beginner", StringComparison.OrdinalIgnoreCase))
+            {
+                if (_planOnly)
+                {
+                    AddConfigPlanEntry("apply-local-preset", "ollama", "gemma:2b", "http://127.0.0.1:11434/v1");
+                    return true;
+                }
+
+                ApplyLocalPreset();
+                return true;
+            }
+
+            if (string.Equals(option.Key, "cloud", StringComparison.OrdinalIgnoreCase))
+            {
+                if (_planOnly)
+                {
+                    AddConfigPlanEntry("apply-cloud-preset", "openai-codex", "gpt-5.4-mini", "https://chatgpt.com/backend-api/codex");
+                    return true;
+                }
+
+                return PrepareCloudPreset("gpt-5.4-mini", "https://chatgpt.com/backend-api/codex");
+            }
+
+            if (!option.IsCustom || !string.Equals(option.Kind, "preset", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var values = ParseLauncherValuePairs(option.Value);
+            string provider;
+            string model;
+            string baseUrl;
+            if (!values.TryGetValue("provider", out provider) || string.IsNullOrWhiteSpace(provider))
+            {
+                provider = "ollama";
+            }
+            if (!values.TryGetValue("model", out model) || string.IsNullOrWhiteSpace(model))
+            {
+                model = "gemma:2b";
+            }
+            if (!values.TryGetValue("baseUrl", out baseUrl) && !values.TryGetValue("base_url", out baseUrl))
+            {
+                baseUrl = string.Equals(provider, "openai-codex", StringComparison.OrdinalIgnoreCase)
+                    ? "https://chatgpt.com/backend-api/codex"
+                    : "http://127.0.0.1:11434/v1";
+            }
+
+            if (_planOnly)
+            {
+                AddConfigPlanEntry("apply-ui-suite-preset", provider, model, baseUrl);
+                return true;
+            }
+
+            if (string.Equals(provider, "ollama", StringComparison.OrdinalIgnoreCase))
+            {
+                ApplyModelPreset(provider, model, baseUrl);
+                return true;
+            }
+
+            if (string.Equals(provider, "openai-codex", StringComparison.OrdinalIgnoreCase))
+            {
+                return PrepareCloudPreset(model, baseUrl);
+            }
+
+            ApplyConfigPreset(provider, model, baseUrl);
+            return true;
+        }
+
+        private bool HandleCodexLoginLaunch()
+        {
+            if (_planOnly)
+            {
+                RunBlockingOpenAiAuthCommand("auth", "add", "openai-codex");
+                return true;
+            }
+
+            if (HasValidCodexAuth())
+            {
+                Log("OpenAI 登录已就绪 - 跳过登录流程，直接继续启动。");
+                return true;
+            }
+
+            var exitCode = RunBlockingOpenAiAuthCommand("auth", "add", "openai-codex");
             if (exitCode != 0)
             {
                 WriteLauncherGuidance(
-                    "Codex 登录未完成",
-                    "登录流程已经结束，但没有拿到有效授权。请先完成浏览器登录，再重新点“Utility: Codex Login”或“Cloud: GPT-5.4 Mini”。");
+                    "OpenAI 登录未完成",
+                    "登录流程已经结束，但没有拿到有效授权。请先完成浏览器登录，再重新点“启动”。");
                 return false;
             }
 
@@ -1155,12 +2676,12 @@ internal sealed class HermesBootstrap
             if (!state.HasCodexAuth)
             {
                 WriteLauncherGuidance(
-                    "Codex 登录已结束，但状态未刷新",
+                    "OpenAI 登录已结束，但状态未刷新",
                     "请确认浏览器里的登录已经成功，然后重新打开启动器再试一次。");
                 return false;
             }
 
-            Log("Codex 登录成功 - 已写入 HermesGo 的 auth.json。");
+            Log("OpenAI 登录成功 - 已写入 HermesGo 的 auth.json。");
             return true;
         }
 
@@ -1195,6 +2716,19 @@ internal sealed class HermesBootstrap
 
             if (string.Equals(provider, "openai-codex", StringComparison.OrdinalIgnoreCase))
             {
+                if (_planOnly)
+                {
+                    AddConfigPlanEntry("apply-custom-cloud-preset", provider, model, baseUrl);
+                    LaunchPackage(new[] {
+                        "-NoOpenBrowser",
+                        "-OAuthProvider", provider,
+                        "-ChatProvider", provider,
+                        "-ChatModel", model
+                    });
+                    OpenUrl("http://127.0.0.1:9119/env?oauth=openai-codex");
+                    return true;
+                }
+
                 if (!HandleCloudLaunch(
                     model,
                     baseUrl,
@@ -1207,13 +2741,27 @@ internal sealed class HermesBootstrap
 
             if (string.Equals(provider, "ollama", StringComparison.OrdinalIgnoreCase))
             {
+                if (_planOnly)
+                {
+                    AddConfigPlanEntry("apply-custom-local-preset", provider, model, baseUrl);
+                    LaunchPackage(new string[0]);
+                    return true;
+                }
+
                 ApplyModelPreset(provider, model, baseUrl);
                 LaunchPackage(new string[0]);
                 return true;
             }
 
+            if (_planOnly)
+            {
+                AddConfigPlanEntry("apply-custom-preset", provider, model, baseUrl);
+                LaunchPackage(new[] { "-OAuthProvider", provider, "-ChatProvider", provider, "-ChatModel", model });
+                return true;
+            }
+
             ApplyConfigPreset(provider, model, baseUrl);
-            LaunchPackage(new[] { "-OAuthProvider", provider });
+            LaunchPackage(new[] { "-OAuthProvider", provider, "-ChatProvider", provider, "-ChatModel", model });
             return true;
         }
 
@@ -1279,10 +2827,10 @@ internal sealed class HermesBootstrap
             var state = new LauncherState
             {
                 Provider = "ollama",
-            Model = "gemma:2b",
-            BaseUrl = "http://127.0.0.1:11434/v1",
-            HasCodexAuth = HasValidCodexAuth(),
-        };
+                Model = "gemma:2b",
+                BaseUrl = "http://127.0.0.1:11434/v1",
+                HasCodexAuth = HasValidCodexAuth(),
+            };
 
         var configPath = Path.Combine(_homeDir, "config.yaml");
         if (!File.Exists(configPath))
@@ -1315,10 +2863,11 @@ internal sealed class HermesBootstrap
             // Keep the fallback summary if the config is unreadable.
         }
 
-        state.IsLocalPreset = string.Equals(state.Provider, "ollama", StringComparison.OrdinalIgnoreCase)
-            && string.Equals(state.Model, "gemma:2b", StringComparison.OrdinalIgnoreCase);
-        state.IsCloudPreset = string.Equals(state.Provider, "openai-codex", StringComparison.OrdinalIgnoreCase)
-            && string.Equals(state.Model, "gpt-5.4-mini", StringComparison.OrdinalIgnoreCase);
+            state.IsLocalPreset = string.Equals(state.Provider, "ollama", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(state.Model, "gemma:2b", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(state.BaseUrl, "http://127.0.0.1:11434/v1", StringComparison.OrdinalIgnoreCase);
+            state.IsCloudPreset = string.Equals(state.Provider, "openai-codex", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(state.Model);
 
             return state;
         }
@@ -1388,6 +2937,30 @@ internal sealed class HermesBootstrap
                         }
                     }
                 }
+
+                object poolObj;
+                if (raw.TryGetValue("credential_pool", out poolObj))
+                {
+                    var pool = poolObj as Dictionary<string, object>;
+                    if (pool != null)
+                    {
+                        object codexEntriesObj;
+                        if (pool.TryGetValue("openai-codex", out codexEntriesObj))
+                        {
+                            var codexEntries = codexEntriesObj as object[];
+                            if (codexEntries != null)
+                            {
+                                foreach (var entryObj in codexEntries)
+                                {
+                                    if (HasValidPooledCodexEntry(entryObj as Dictionary<string, object>))
+                                    {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             catch
             {
@@ -1418,7 +2991,96 @@ internal sealed class HermesBootstrap
 
             var accessToken = tokens.ContainsKey("access_token") ? tokens["access_token"] as string : null;
             var refreshToken = tokens.ContainsKey("refresh_token") ? tokens["refresh_token"] as string : null;
-            return !string.IsNullOrWhiteSpace(accessToken) && !string.IsNullOrWhiteSpace(refreshToken);
+            return HasUsableCodexAccessToken(accessToken) && !string.IsNullOrWhiteSpace(refreshToken);
+        }
+
+        private static bool HasValidPooledCodexEntry(Dictionary<string, object> entry)
+        {
+            if (entry == null)
+            {
+                return false;
+            }
+
+            var accessToken = entry.ContainsKey("access_token") ? entry["access_token"] as string : null;
+            var refreshToken = entry.ContainsKey("refresh_token") ? entry["refresh_token"] as string : null;
+            return HasUsableCodexAccessToken(accessToken) && !string.IsNullOrWhiteSpace(refreshToken);
+        }
+
+        private static bool HasUsableCodexAccessToken(string accessToken)
+        {
+            if (string.IsNullOrWhiteSpace(accessToken))
+            {
+                return false;
+            }
+
+            long expiresAt;
+            if (!TryReadJwtExpiration(accessToken, out expiresAt))
+            {
+                return true;
+            }
+
+            var now = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+            return expiresAt > now + 300;
+        }
+
+        private static bool TryReadJwtExpiration(string token, out long expiresAt)
+        {
+            expiresAt = 0;
+            var parts = (token ?? string.Empty).Split('.');
+            if (parts.Length < 2)
+            {
+                return false;
+            }
+
+            try
+            {
+                var payload = parts[1].Replace('-', '+').Replace('_', '/');
+                switch (payload.Length % 4)
+                {
+                    case 2:
+                        payload += "==";
+                        break;
+                    case 3:
+                        payload += "=";
+                        break;
+                }
+
+                var json = Encoding.UTF8.GetString(Convert.FromBase64String(payload));
+                var serializer = new JavaScriptSerializer();
+                var claims = serializer.DeserializeObject(json) as Dictionary<string, object>;
+                if (claims == null || !claims.ContainsKey("exp"))
+                {
+                    return false;
+                }
+
+                var value = claims["exp"];
+                if (value is int)
+                {
+                    expiresAt = (int)value;
+                    return true;
+                }
+                if (value is long)
+                {
+                    expiresAt = (long)value;
+                    return true;
+                }
+                if (value is decimal)
+                {
+                    expiresAt = (long)(decimal)value;
+                    return true;
+                }
+                if (value is double)
+                {
+                    expiresAt = (long)(double)value;
+                    return true;
+                }
+
+                return long.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), out expiresAt);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private bool HasValidCodexAuth()
@@ -1492,37 +3154,78 @@ internal sealed class HermesBootstrap
         configText = UpdateYamlScalar(configText, "provider", provider);
         configText = UpdateYamlScalar(configText, "base_url", baseUrl);
         File.WriteAllText(configPath, configText, Encoding.UTF8);
+        Log("config preset applied: provider=" + provider + ", model=" + model + ", base_url=" + baseUrl);
     }
 
-    private void LaunchBatchScript(string scriptName, string[] args = null)
+    private void LaunchBatchScript(string scriptName, string[] args = null, bool visible = true)
     {
-        var scriptPath = Path.Combine(_root, scriptName);
+        var scriptPath = ResolveScriptPath(scriptName);
         if (!File.Exists(scriptPath))
         {
             Log("utility script not found: " + scriptPath);
             return;
         }
 
-        var batchArgs = new List<string> { "/k", Quote(scriptPath) };
-        if (args != null)
+        var extension = Path.GetExtension(scriptPath) ?? string.Empty;
+        ProcessStartInfo psi;
+        if (string.Equals(extension, ".ps1", StringComparison.OrdinalIgnoreCase))
         {
-            foreach (var arg in args)
+            var psArgs = new List<string> { "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Quote(scriptPath) };
+            if (args != null)
             {
-                batchArgs.Add(Quote(arg));
+                foreach (var arg in args)
+                {
+                    psArgs.Add(Quote(arg));
+                }
             }
+
+            psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = string.Join(" ", psArgs),
+                WorkingDirectory = _contentRoot,
+                UseShellExecute = false,
+                CreateNoWindow = !visible,
+                WindowStyle = visible ? ProcessWindowStyle.Normal : ProcessWindowStyle.Hidden,
+            };
+        }
+        else
+        {
+            var batchArgs = new List<string> { "/k", Quote(scriptPath) };
+            if (args != null)
+            {
+                foreach (var arg in args)
+                {
+                    batchArgs.Add(Quote(arg));
+                }
+            }
+
+            psi = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = string.Join(" ", batchArgs),
+                WorkingDirectory = _contentRoot,
+                UseShellExecute = false,
+                CreateNoWindow = !visible,
+                WindowStyle = visible ? ProcessWindowStyle.Normal : ProcessWindowStyle.Hidden,
+            };
         }
 
-        var psi = new ProcessStartInfo
+        if (_planOnly)
         {
-            FileName = "cmd.exe",
-            Arguments = string.Join(" ", batchArgs),
-            WorkingDirectory = _root,
-            UseShellExecute = false,
-            CreateNoWindow = false,
-            WindowStyle = ProcessWindowStyle.Normal,
-        };
+            PlanProcessStart(
+                "launch-utility-script",
+                psi,
+                BuildScriptPlanOnlyCommandLine(scriptPath, args),
+                new Dictionary<string, object>
+                {
+                    { "script", scriptName },
+                    { "visible", visible },
+                });
+            return;
+        }
 
-        Process.Start(psi);
+        TrackLaunchedProcess(Process.Start(psi));
         Log("launched utility script: " + scriptName);
     }
 
@@ -1537,13 +3240,23 @@ internal sealed class HermesBootstrap
         {
             FileName = "explorer.exe",
             Arguments = Quote(path),
-            WorkingDirectory = _root,
+            WorkingDirectory = _contentRoot,
             UseShellExecute = false,
             CreateNoWindow = false,
             WindowStyle = ProcessWindowStyle.Normal,
         };
 
-        Process.Start(psi);
+        if (_planOnly)
+        {
+            PlanProcessStart(
+                "open-folder",
+                psi,
+                string.Empty,
+                new Dictionary<string, object> { { "path", path } });
+            return;
+        }
+
+        TrackLaunchedProcess(Process.Start(psi));
         Log("opened folder: " + path);
     }
 
@@ -1563,17 +3276,27 @@ internal sealed class HermesBootstrap
         var psi = new ProcessStartInfo
         {
             FileName = path,
-            WorkingDirectory = _root,
+            WorkingDirectory = _contentRoot,
             UseShellExecute = true,
         };
 
-        Process.Start(psi);
+        if (_planOnly)
+        {
+            PlanProcessStart(
+                "open-text-file",
+                psi,
+                string.Empty,
+                new Dictionary<string, object> { { "path", path } });
+            return;
+        }
+
+        TrackLaunchedProcess(Process.Start(psi));
         Log("opened text file: " + path);
     }
 
     private int RunBlockingScript(string scriptName, string[] args = null)
     {
-        var scriptPath = Path.Combine(_root, scriptName);
+        var scriptPath = ResolveScriptPath(scriptName);
         if (!File.Exists(scriptPath))
         {
             Log("blocking utility script not found: " + scriptPath);
@@ -1588,7 +3311,7 @@ internal sealed class HermesBootstrap
             {
                 FileName = "powershell.exe",
                 Arguments = BuildPowerShellArguments(scriptPath, args),
-                WorkingDirectory = _root,
+                WorkingDirectory = _contentRoot,
                 UseShellExecute = false,
                 CreateNoWindow = false,
                 WindowStyle = ProcessWindowStyle.Normal,
@@ -1609,11 +3332,21 @@ internal sealed class HermesBootstrap
             {
                 FileName = "cmd.exe",
                 Arguments = string.Join(" ", batchArgs),
-                WorkingDirectory = _root,
+                WorkingDirectory = _contentRoot,
                 UseShellExecute = false,
                 CreateNoWindow = false,
                 WindowStyle = ProcessWindowStyle.Normal,
             };
+        }
+
+        if (_planOnly)
+        {
+            PlanProcessStart(
+                "run-blocking-script",
+                psi,
+                BuildScriptPlanOnlyCommandLine(scriptPath, args),
+                new Dictionary<string, object> { { "script", scriptName } });
+            return 0;
         }
 
         using (var process = Process.Start(psi))
@@ -1640,7 +3373,7 @@ internal sealed class HermesBootstrap
         {
             FileName = _pythonExe,
             Arguments = "-c " + Quote(command),
-            WorkingDirectory = _root,
+            WorkingDirectory = _contentRoot,
             UseShellExecute = false,
             CreateNoWindow = false,
             WindowStyle = ProcessWindowStyle.Normal,
@@ -1660,26 +3393,25 @@ internal sealed class HermesBootstrap
         }
     }
 
-    private int RunBlockingCodexLoginCommand(string command)
+    private int RunBlockingOpenAiAuthCommand(params string[] arguments)
     {
-        var codexCmd = Path.Combine(_root, "codex.cmd");
-        if (!File.Exists(codexCmd))
+        if (!File.Exists(_pythonExe))
         {
-            Log("codex compatibility launcher not found: " + codexCmd);
+            Log("python runtime not found: " + _pythonExe);
             return 1;
         }
 
-        var loginStdout = Path.Combine(_root, "logs", "update", "codex-login.out.txt");
-        var loginStderr = Path.Combine(_root, "logs", "update", "codex-login.err.txt");
-        Directory.CreateDirectory(Path.GetDirectoryName(loginStdout) ?? _root);
+        var loginStdout = Path.Combine(_contentRoot, "logs", "update", "openai-codex-login.out.txt");
+        var loginStderr = Path.Combine(_contentRoot, "logs", "update", "openai-codex-login.err.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(loginStdout) ?? _contentRoot);
         File.WriteAllText(loginStdout, string.Empty, new UTF8Encoding(false));
         File.WriteAllText(loginStderr, string.Empty, new UTF8Encoding(false));
 
         var psi = new ProcessStartInfo
         {
-            FileName = "cmd.exe",
-            Arguments = "/c " + Quote(codexCmd) + (string.IsNullOrWhiteSpace(command) ? string.Empty : " " + command),
-            WorkingDirectory = _root,
+            FileName = _pythonExe,
+            Arguments = "-m hermes_cli.main " + string.Join(" ", arguments.Select(Quote)),
+            WorkingDirectory = _contentRoot,
             UseShellExecute = false,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden,
@@ -1691,11 +3423,21 @@ internal sealed class HermesBootstrap
 
         ApplyInteractiveEnvironment(psi);
 
+        if (_planOnly)
+        {
+            PlanProcessStart(
+                "run-openai-auth-command",
+                psi,
+                string.Empty,
+                new Dictionary<string, object> { { "arguments", arguments.ToArray() } });
+            return 0;
+        }
+
         using (var process = Process.Start(psi))
         {
             if (process == null)
             {
-                throw new InvalidOperationException("Unable to start codex login command.");
+                throw new InvalidOperationException("Unable to start OpenAI auth command.");
             }
 
             var stdout = process.StandardOutput.ReadToEndAsync();
@@ -1703,7 +3445,7 @@ internal sealed class HermesBootstrap
             process.WaitForExit();
             File.WriteAllText(loginStdout, stdout.GetAwaiter().GetResult() ?? string.Empty, new UTF8Encoding(false));
             File.WriteAllText(loginStderr, stderr.GetAwaiter().GetResult() ?? string.Empty, new UTF8Encoding(false));
-            Log("codex login command finished: exit=" + process.ExitCode);
+            Log("OpenAI auth command finished: exit=" + process.ExitCode);
             return process.ExitCode;
         }
     }
@@ -1768,7 +3510,7 @@ internal sealed class HermesBootstrap
             else
             {
                 ApplyConfigPreset(provider, model, baseUrl);
-                LaunchPackage(new[] { "-NoOpenChat", "-OAuthProvider", provider });
+                LaunchPackage(new[] { "-NoOpenChat", "-OAuthProvider", provider, "-ChatProvider", provider, "-ChatModel", model });
             }
             return;
         }
@@ -1811,7 +3553,17 @@ internal sealed class HermesBootstrap
             UseShellExecute = true,
         };
 
-        Process.Start(psi);
+        if (_planOnly)
+        {
+            PlanProcessStart(
+                "open-url",
+                psi,
+                string.Empty,
+                new Dictionary<string, object> { { "url", url } });
+            return;
+        }
+
+        TrackLaunchedProcess(Process.Start(psi));
         Log("opened url: " + url);
         BringKnownBrowserToFront();
     }
@@ -1986,7 +3738,7 @@ internal sealed class HermesBootstrap
         psi.EnvironmentVariables["PYTHONPATH"] = _runtimeDir;
         psi.EnvironmentVariables["PATH"] = string.Join(";", new[]
         {
-            _root,
+            _contentRoot,
             _runtimeBinDir,
             Environment.GetEnvironmentVariable("PATH") ?? string.Empty,
         });
@@ -2018,8 +3770,8 @@ internal sealed class HermesBootstrap
 
     private void LaunchPackage(string[] args)
     {
-        var script = Path.Combine(_root, "Start-HermesGo.ps1");
-        var batch = Path.Combine(_root, "HermesGo.bat");
+        var script = ResolveScriptPath("Start-HermesGo.ps1");
+        var batch = ResolveScriptPath("HermesGo.bat");
         var useScript = File.Exists(script);
         var fileName = useScript ? "powershell.exe" : "cmd.exe";
         var arguments = useScript
@@ -2030,14 +3782,251 @@ internal sealed class HermesBootstrap
         {
             FileName = fileName,
             Arguments = arguments,
-            WorkingDirectory = _root,
+            WorkingDirectory = _contentRoot,
             UseShellExecute = false,
             CreateNoWindow = false,
             WindowStyle = ProcessWindowStyle.Normal,
         };
 
-        Process.Start(psi);
+        if (_planOnly)
+        {
+            var nextDebugCommandLine = useScript
+                ? BuildCommandLine(fileName, BuildPowerShellArguments(script, AppendPlanOnlyArg(args)))
+                : string.Empty;
+            PlanProcessStart(
+                "launch-package",
+                psi,
+                nextDebugCommandLine,
+                new Dictionary<string, object>
+                {
+                    { "script", useScript ? script : batch },
+                    { "args", (args ?? new string[0]).ToArray() },
+                });
+            return;
+        }
+
+        TrackLaunchedProcess(Process.Start(psi));
         Log(useScript ? "launched Start-HermesGo.ps1" : "launched HermesGo.bat");
+    }
+
+    private void LaunchWebUiOnly()
+    {
+        var batch = ResolveScriptPath("HermesWebUI.bat");
+        if (!File.Exists(batch))
+        {
+            throw new FileNotFoundException("HermesWebUI.bat not found", batch);
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = BuildBatchArguments(batch, new string[0]),
+            WorkingDirectory = _contentRoot,
+            UseShellExecute = false,
+            CreateNoWindow = false,
+            WindowStyle = ProcessWindowStyle.Normal,
+        };
+
+        TrackLaunchedProcess(Process.Start(psi));
+        Log("launched HermesWebUI.bat");
+    }
+
+    private void LaunchDesktopOnly()
+    {
+        var batch = ResolveScriptPath("HermesDesktop.bat");
+        if (!File.Exists(batch))
+        {
+            throw new FileNotFoundException("HermesDesktop.bat not found", batch);
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = BuildBatchArguments(batch, new string[0]),
+            WorkingDirectory = _contentRoot,
+            UseShellExecute = false,
+            CreateNoWindow = false,
+            WindowStyle = ProcessWindowStyle.Normal,
+        };
+
+        TrackLaunchedProcess(Process.Start(psi));
+        Log("launched HermesDesktop.bat");
+    }
+
+    private void AddConfigPlanEntry(string step, string provider, string model, string baseUrl)
+    {
+        if (!_planOnly)
+        {
+            return;
+        }
+
+        var details = new Dictionary<string, object>
+        {
+            { "provider", provider ?? string.Empty },
+            { "model", model ?? string.Empty },
+            { "base_url", baseUrl ?? string.Empty },
+            { "target", Path.Combine(_homeDir, "config.yaml") },
+        };
+
+        AddPlanEntry(new CommandPlanEntry
+        {
+            StepName = step,
+            Kind = "config",
+            Details = details,
+        });
+    }
+
+    private void PlanProcessStart(string step, ProcessStartInfo psi, string nextDebugCommandLine, Dictionary<string, object> details)
+    {
+        if (psi == null)
+        {
+            return;
+        }
+
+        AddPlanEntry(new CommandPlanEntry
+        {
+            StepName = step,
+            Kind = "process",
+            FileName = psi.FileName ?? string.Empty,
+            Arguments = psi.Arguments ?? string.Empty,
+            WorkingDirectory = psi.WorkingDirectory ?? string.Empty,
+            UseShellExecute = psi.UseShellExecute,
+            CreateNoWindow = psi.CreateNoWindow,
+            WindowStyle = psi.WindowStyle.ToString(),
+            CommandLine = BuildCommandLine(psi.FileName, psi.Arguments),
+            NextDebugCommandLine = nextDebugCommandLine ?? string.Empty,
+            Details = details ?? new Dictionary<string, object>(),
+        });
+    }
+
+    private void AddPlanEntry(CommandPlanEntry entry)
+    {
+        if (entry == null)
+        {
+            return;
+        }
+
+        entry.Step = _planEntries.Count + 1;
+        entry.GeneratedAt = DateTimeOffset.Now.ToString("o", CultureInfo.InvariantCulture);
+        _planEntries.Add(entry);
+        WritePlanFiles();
+        Log("planned command step " + entry.Step + ": " + entry.StepName);
+    }
+
+    private string GetExePlanJsonPath()
+    {
+        return Path.Combine(_contentRoot, "logs", "last-exe-command-plan.json");
+    }
+
+    private string GetExePlanScriptPath()
+    {
+        return Path.Combine(_contentRoot, "logs", "last-exe-command-plan.ps1");
+    }
+
+    private void WritePlanFiles()
+    {
+        var logDir = Path.Combine(_contentRoot, "logs");
+        Directory.CreateDirectory(logDir);
+
+        var serializer = new JavaScriptSerializer
+        {
+            MaxJsonLength = int.MaxValue,
+        };
+        var plan = new Dictionary<string, object>
+        {
+            { "schema", 1 },
+            { "generated_at", DateTimeOffset.Now.ToString("o", CultureInfo.InvariantCulture) },
+            { "plan_only", true },
+            { "source", "HermesGo.exe" },
+            { "content_root", _contentRoot },
+            { "commands", _planEntries },
+        };
+
+        File.WriteAllText(GetExePlanJsonPath(), serializer.Serialize(plan), new UTF8Encoding(false));
+        File.WriteAllText(GetExePlanScriptPath(), BuildPlanScript(), new UTF8Encoding(false));
+    }
+
+    private string BuildPlanScript()
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("# HermesGo dry-run command plan.");
+        builder.AppendLine("# This file is generated by HermesGo.exe and does not run anything by itself.");
+        builder.AppendLine("# Copy one command at a time when debugging.");
+        builder.AppendLine();
+
+        foreach (var entry in _planEntries)
+        {
+            builder.AppendLine("# Step " + entry.Step.ToString(CultureInfo.InvariantCulture) + ": " + entry.StepName);
+            if (!string.IsNullOrWhiteSpace(entry.CommandLine))
+            {
+                builder.AppendLine("# Actual command:");
+                builder.AppendLine("# " + entry.CommandLine);
+            }
+            if (!string.IsNullOrWhiteSpace(entry.NextDebugCommandLine))
+            {
+                builder.AppendLine("# Next debug command:");
+                builder.AppendLine("# " + entry.NextDebugCommandLine);
+            }
+            if (string.Equals(entry.Kind, "config", StringComparison.OrdinalIgnoreCase) && entry.Details != null)
+            {
+                builder.AppendLine("# Config change:");
+                foreach (var pair in entry.Details)
+                {
+                    builder.AppendLine("# " + pair.Key + " = " + Convert.ToString(pair.Value, CultureInfo.InvariantCulture));
+                }
+            }
+            builder.AppendLine();
+        }
+
+        return builder.ToString();
+    }
+
+    private string BuildScriptPlanOnlyCommandLine(string scriptPath, string[] args)
+    {
+        if (string.IsNullOrWhiteSpace(scriptPath))
+        {
+            return string.Empty;
+        }
+
+        var scriptName = Path.GetFileName(scriptPath) ?? string.Empty;
+        if (!string.Equals(Path.GetExtension(scriptPath), ".ps1", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        if (!SupportsPlanOnlyScript(scriptName))
+        {
+            return string.Empty;
+        }
+
+        return BuildCommandLine("powershell.exe", BuildPowerShellArguments(scriptPath, AppendPlanOnlyArg(args)));
+    }
+
+    private static bool SupportsPlanOnlyScript(string scriptName)
+    {
+        return string.Equals(scriptName, "Start-HermesGo.ps1", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string[] AppendPlanOnlyArg(string[] args)
+    {
+        var result = new List<string>(args ?? new string[0]);
+        if (!result.Any(arg => string.Equals(arg, "-PlanOnly", StringComparison.OrdinalIgnoreCase)))
+        {
+            result.Add("-PlanOnly");
+        }
+
+        return result.ToArray();
+    }
+
+    private static string BuildCommandLine(string fileName, string arguments)
+    {
+        var command = Quote(fileName ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(arguments))
+        {
+            command += " " + arguments.Trim();
+        }
+
+        return command;
     }
 
     private string BuildPowerShellArguments(string script, string[] args)
@@ -2059,6 +4048,48 @@ internal sealed class HermesBootstrap
         return "/c " + Quote(batch) + (joined.Length > 0 ? " " + joined : string.Empty);
     }
 
+    private string ResolveScriptPath(string scriptName)
+    {
+        if (string.IsNullOrWhiteSpace(scriptName))
+        {
+            return string.Empty;
+        }
+
+        if (Path.IsPathRooted(scriptName))
+        {
+            return scriptName;
+        }
+
+        var scriptsCandidate = Path.Combine(_scriptsDir, scriptName);
+        if (File.Exists(scriptsCandidate))
+        {
+            return scriptsCandidate;
+        }
+
+        return Path.Combine(_contentRoot, scriptName);
+    }
+
+    private string ResolveToolPath(string toolName)
+    {
+        if (string.IsNullOrWhiteSpace(toolName))
+        {
+            return string.Empty;
+        }
+
+        if (Path.IsPathRooted(toolName))
+        {
+            return toolName;
+        }
+
+        var toolsCandidate = Path.Combine(_toolsDir, toolName);
+        if (File.Exists(toolsCandidate))
+        {
+            return toolsCandidate;
+        }
+
+        return Path.Combine(_contentRoot, toolName);
+    }
+
     private static string Quote(string value)
     {
         if (string.IsNullOrEmpty(value))
@@ -2072,6 +4103,23 @@ internal sealed class HermesBootstrap
         }
 
         return value;
+    }
+
+    private sealed class CommandPlanEntry
+    {
+        public int Step { get; set; }
+        public string StepName { get; set; }
+        public string Kind { get; set; }
+        public string GeneratedAt { get; set; }
+        public string FileName { get; set; }
+        public string Arguments { get; set; }
+        public string WorkingDirectory { get; set; }
+        public bool UseShellExecute { get; set; }
+        public bool CreateNoWindow { get; set; }
+        public string WindowStyle { get; set; }
+        public string CommandLine { get; set; }
+        public string NextDebugCommandLine { get; set; }
+        public Dictionary<string, object> Details { get; set; }
     }
 
     private sealed class LauncherState
@@ -2101,24 +4149,89 @@ internal sealed class HermesBootstrap
             }
         }
 
+        public sealed class UiSuiteModelItem
+        {
+            public string Id { get; set; }
+            public string Label { get; set; }
+            public string Provider { get; set; }
+            public string Model { get; set; }
+            public string BaseUrl { get; set; }
+            public string Description { get; set; }
+            public string OAuthProvider { get; set; }
+
+            public override string ToString()
+            {
+                return Label ?? string.Empty;
+            }
+        }
+
+        public sealed class UiSuiteUiItem
+        {
+            public string Id { get; set; }
+            public string Name { get; set; }
+            public string Description { get; set; }
+            public string DefaultUrl { get; set; }
+
+            public override string ToString()
+            {
+                return string.Format("{0} {1}", Id ?? string.Empty, Name ?? string.Empty).Trim();
+            }
+        }
+
+        public sealed class UiSuiteSelection
+        {
+            public UiSuiteUiItem Ui { get; set; }
+            public LauncherOption MainAction { get; set; }
+            public bool AutoOpenBrowser { get; set; }
+            public bool AutoOpenChat { get; set; }
+        }
+
         public event EventHandler BeginnerRequested;
+        public event EventHandler FullLaunchRequested;
+        public event EventHandler WebUiOnlyRequested;
+        public event EventHandler DesktopOnlyRequested;
         public event EventHandler CloudRequested;
         public event EventHandler ExpertRequested;
         public event EventHandler SwitchModelRequested;
         public event EventHandler VerifyRequested;
         public event EventHandler CodexLoginRequested;
+        public event EventHandler<UiSuiteSelection> UiSuiteLaunchRequested;
         public event EventHandler OpenHomeRequested;
         public event EventHandler OpenLogsRequested;
         public event EventHandler OpenCustomActionsRequested;
         public event EventHandler<LauncherOption> CustomActionRequested;
         public event EventHandler ExitRequested;
+        public event EventHandler UpdateRequested;
+
+        private enum LaunchTarget
+        {
+            MainAction,
+            UiSuite,
+        }
 
         private ComboBox _selectionBox;
-        private Button _executeSelectionButton;
-        private Button _helpButton;
         private Label _selectionDescription;
+        private Panel _uiSuitePanel;
+        private TableLayoutPanel _mainPanel;
+        private Button _launchButton;
+        private Label _uiSuiteHintLabel;
+        private ListBox _uiSuiteListBox;
+        private Label _uiSuiteSelectedTitle;
+        private TextBox _uiSuiteUiDescription;
+        private CheckBox _uiSuiteBrowserCheckBox;
+        private CheckBox _uiSuiteChatCheckBox;
+        private Label _updateStatusLabel;
+        private ProgressBar _updateProgressBar;
+        private ComboBox _updateReleaseBox;
+        private Button _updateButton;
         private readonly LauncherState _launcherState;
         private readonly List<LauncherOption> _launcherOptions = new List<LauncherOption>();
+        private readonly List<ReleaseInfo> _availableUpdateReleases = new List<ReleaseInfo>();
+        private ReleaseInfo _pendingUpdate;
+        private bool _updateReady;
+        private LaunchTarget _launchTarget = LaunchTarget.MainAction;
+
+        public ReleaseInfo PendingUpdate { get { return _pendingUpdate; } }
 
         public LauncherForm(LauncherState state)
         {
@@ -2131,12 +4244,15 @@ internal sealed class HermesBootstrap
 
             Text = "HermesGo 启动器";
             StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            MaximizeBox = false;
-            MinimizeBox = false;
+            AutoScaleMode = AutoScaleMode.None;
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = true;
+            MinimizeBox = true;
             ShowInTaskbar = true;
-            Width = 920;
-            Height = 520;
+            ClientSize = GetScaledClientSize(1040, 720);
+            MinimumSize = GetScaledClientSize(960, 640);
+            AutoScroll = true;
             BackColor = Color.FromArgb(245, 242, 235);
             Font = new Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point);
 
@@ -2203,7 +4319,7 @@ internal sealed class HermesBootstrap
                 Width = 220,
                 Height = 96,
                 ForeColor = Color.FromArgb(214, 222, 255),
-                Text = "新手可以直接一键启动。高手可以进 Dashboard。切换到 GPT-5.4 mini 也可以从这里直接选。",
+                Text = "绿色便携版：Dashboard + WebUI + Desktop 三件套。双击 exe 与 HermesGo.bat 相同直接启动；加 --menu 可打开本菜单。",
             };
 
             var summaryBox = new Panel
@@ -2242,12 +4358,21 @@ internal sealed class HermesBootstrap
             heroPanel.Controls.Add(heroSubtitle);
             heroPanel.Controls.Add(summaryBox);
 
-            var mainPanel = new Panel
+            _mainPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 BackColor = BackColor,
                 Padding = new Padding(12, 0, 0, 0),
+                ColumnCount = 1,
+                RowCount = 6,
             };
+            _mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            _mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58F));
+            _mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
+            _mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 178F));
+            _mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 340F));
+            _mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
+            _mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 56F));
 
             var header = new Label
             {
@@ -2256,7 +4381,7 @@ internal sealed class HermesBootstrap
                 Height = 58,
                 Font = new Font(Font.FontFamily, 18F, FontStyle.Bold),
                 ForeColor = Color.FromArgb(30, 30, 35),
-                Text = "请选择一个启动方式",
+                Text = "HermesGo 启动菜单（--menu）",
             };
 
             var subtitle = new Label
@@ -2265,154 +4390,109 @@ internal sealed class HermesBootstrap
                 Dock = DockStyle.Top,
                 Height = 34,
                 ForeColor = Color.FromArgb(96, 96, 110),
-                Text = "新手点第一项就能用。要用 GPT-5.4 mini 点第二项。要看全部配置和日志点第三项。",
+                Text = "默认第一项与 HermesGo.bat 相同；也可单独启动 WebUI 或 Desktop。",
             };
 
             var actionPanel = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 188,
+                Height = 178,
                 BackColor = Color.FromArgb(236, 240, 246),
                 Padding = new Padding(12),
             };
 
+            var actionLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+            };
+            actionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            actionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 20F));
+            actionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
+            actionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
             var actionTitle = new Label
             {
                 AutoSize = false,
-                Dock = DockStyle.Top,
-                Height = 20,
+                Dock = DockStyle.Fill,
                 ForeColor = Color.FromArgb(70, 72, 80),
                 Font = new Font(Font.FontFamily, 10F, FontStyle.Bold),
-                Text = "请选择一个启动方式",
+                Text = "HermesGo 主启动与维护",
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0),
             };
+
+            var actionControls = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+            };
+            actionControls.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            actionControls.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
+            actionControls.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
             _selectionBox = new ComboBox
             {
-                Left = 12,
-                Top = 34,
-                Width = 352,
-                Height = 28,
+                Dock = DockStyle.Fill,
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Font = new Font(Font.FontFamily, 10F, FontStyle.Regular),
+                Margin = new Padding(0, 1, 8, 0),
             };
             _selectionBox.SelectedIndexChanged += delegate { UpdateSelectionDescription(); };
-
-            _executeSelectionButton = new Button
+            _selectionBox.KeyDown += delegate(object sender, KeyEventArgs e)
             {
-                Left = 372,
-                Top = 32,
-                Width = 110,
-                Height = 32,
+                if (e != null && e.KeyCode == Keys.Enter)
+                {
+                    ExecuteCurrentLaunch();
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                }
+            };
+            _selectionBox.DoubleClick += delegate { ExecuteCurrentLaunch(); };
+
+            _launchButton = new Button
+            {
+                Dock = DockStyle.Fill,
                 Text = "启动",
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(44, 120, 228),
+                BackColor = Color.FromArgb(41, 142, 98),
                 ForeColor = Color.White,
                 UseVisualStyleBackColor = false,
+                Margin = new Padding(0, 0, 8, 0),
             };
-            _executeSelectionButton.FlatAppearance.BorderSize = 0;
-            _executeSelectionButton.Click += delegate { ExecuteSelectedAction(); };
+            _launchButton.FlatAppearance.BorderSize = 0;
+            _launchButton.Click += delegate { ExecuteCurrentLaunch(); };
 
-            _helpButton = new Button
-            {
-                Left = 492,
-                Top = 32,
-                Width = 68,
-                Height = 32,
-                Text = "帮助",
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(106, 106, 118),
-                ForeColor = Color.White,
-                UseVisualStyleBackColor = false,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-            };
-            _helpButton.FlatAppearance.BorderSize = 0;
-            _helpButton.Click += delegate { ShowSelectedActionHelp(); };
+            actionControls.Controls.Add(_selectionBox, 0, 0);
+            actionControls.Controls.Add(_launchButton, 1, 0);
 
             _selectionDescription = new Label
             {
                 AutoSize = false,
-                Left = 12,
-                Top = 72,
-                Width = 548,
-                Height = 96,
+                Dock = DockStyle.Fill,
                 ForeColor = Color.FromArgb(88, 90, 100),
-                Text = "先从上面的菜单选一个动作，再点“启动”。需要更详细的说明时点“帮助”。",
+                Text = "选中后点“启动”；底部可检查并安装 wangkj123/HermesGo 官网新版本。",
+                TextAlign = ContentAlignment.TopLeft,
+                Margin = new Padding(0, 6, 0, 0),
             };
             _selectionDescription.Visible = true;
 
-            actionPanel.Controls.Add(_selectionDescription);
-            actionPanel.Controls.Add(_helpButton);
-            actionPanel.Controls.Add(_selectionBox);
-            actionPanel.Controls.Add(actionTitle);
-
-            var cards = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                AutoScroll = true,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                Padding = new Padding(0, 10, 12, 0),
-            };
-
-            cards.Controls.Add(CreateActionCard(
-                "一键启动（本地 2B）",
-                "适合新手，保留默认的离线本地模型，不会触发 ChatGPT / Codex 登录，直接打开聊天和浏览器。",
-                "启动 HermesGo",
-                delegate { OnBeginnerRequested(); },
-                Color.FromArgb(44, 120, 228)));
-
-            cards.Controls.Add(CreateActionCard(
-                "Cloud: GPT-5.4 Mini",
-                "切换到 OpenAI Codex 路线，默认模型改成 gpt-5.4-mini。只有这里在未登录时才会自动运行 bundled 的 codex login。",
-                "使用 GPT-5.4 mini",
-                delegate { OnCloudRequested(); },
-                Color.FromArgb(34, 151, 115)));
-
-            cards.Controls.Add(CreateActionCard(
-                "Expert: Dashboard Only",
-                "只启动 Dashboard 和后台服务，不主动弹聊天窗口，适合高级用户调参数和看日志。",
-                "打开 Dashboard",
-                delegate { OnExpertRequested(); },
-                Color.FromArgb(158, 87, 27)));
-
-            cards.Controls.Add(CreateActionCard(
-                "Utility: Switch Local Model",
-                "打开本地模型切换脚本，用来改 Ollama 离线模型，比如 gemma、qwen。",
-                "切换本地模型",
-                delegate { OnSwitchModelRequested(); },
-                Color.FromArgb(124, 84, 26)));
-
-            cards.Controls.Add(CreateActionCard(
-                "Utility: Self Check",
-                "运行绿色包自检，检查启动器、图标、模型目录、Dashboard 入口和日志是否正常。",
-                "开始自检",
-                delegate { OnVerifyRequested(); },
-                Color.FromArgb(98, 110, 126)));
-
-            cards.Controls.Add(CreateActionCard(
-                "Utility: Codex Login",
-                "只在你想手动切换或重新授权 OpenAI / Codex 账号时使用。不会影响本地 2B 启动。",
-                "登录 Codex",
-                delegate { OnCodexLoginRequested(); },
-                Color.FromArgb(105, 72, 150)));
-
-            cards.Controls.Add(CreateActionCard(
-                "Open: Home Folder",
-                "直接打开 home 目录，里面通常放 config.yaml、session、记忆和运行状态文件。",
-                "打开 home",
-                delegate { OnOpenHomeRequested(); },
-                Color.FromArgb(72, 121, 163)));
-
-            cards.Controls.Add(CreateActionCard(
-                "Open: Logs Folder",
-                "直接打开 logs 目录，方便查看启动日志、更新日志和 Dashboard 日志。",
-                "打开 logs",
-                delegate { OnOpenLogsRequested(); },
-                Color.FromArgb(90, 90, 90)));
+            actionLayout.Controls.Add(actionTitle, 0, 0);
+            actionLayout.Controls.Add(actionControls, 0, 1);
+            actionLayout.Controls.Add(_selectionDescription, 0, 2);
+            actionPanel.Controls.Add(actionLayout);
 
             PopulateLauncherOptions(_launcherState);
-            cards.Visible = false;
-            cards.Height = 0;
+            BuildUiSuitePanel();
+            RefreshLaunchTarget();
 
             var footer = new Label
             {
@@ -2420,7 +4500,7 @@ internal sealed class HermesBootstrap
                 Dock = DockStyle.Bottom,
                 Height = 34,
                 ForeColor = Color.FromArgb(110, 110, 120),
-                Text = "如果你只是想先能用，点第一项就够了。",
+                Text = "自动更新会下载 green-3ui-slim 便携 zip，保留 home/data/logs。",
             };
 
             var exitButton = new Button
@@ -2438,38 +4518,137 @@ internal sealed class HermesBootstrap
             var footerRow = new Panel
             {
                 Dock = DockStyle.Bottom,
-                Height = 42,
+                Height = 56,
             };
-            _executeSelectionButton.Dock = DockStyle.Right;
-            footerRow.Controls.Add(_executeSelectionButton);
+
+            _updateStatusLabel = new Label
+            {
+                AutoSize = false,
+                Dock = DockStyle.Top,
+                Height = 20,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(95, 95, 108),
+                Text = "启动器已就绪。",
+            };
+
+            _updateProgressBar = new ProgressBar
+            {
+                Dock = DockStyle.Bottom,
+                Height = 9,
+                Visible = false,
+                Style = ProgressBarStyle.Marquee,
+                MarqueeAnimationSpeed = 24,
+                Minimum = 0,
+                Maximum = 100,
+            };
+
+            var updateStatusPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+            };
+            updateStatusPanel.Controls.Add(_updateProgressBar);
+            updateStatusPanel.Controls.Add(_updateStatusLabel);
+
+            _updateReleaseBox = new ComboBox
+            {
+                Width = 220,
+                Height = 28,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font(Font.FontFamily, 9.5F, FontStyle.Regular),
+                Visible = false,
+                Enabled = false,
+                Margin = new Padding(0, 4, 8, 0),
+            };
+            _updateReleaseBox.SelectedIndexChanged += delegate { UpdateSelectedUpdateRelease(); };
+
+            _updateButton = new Button
+            {
+                Text = "检查更新",
+                Width = 112,
+                Height = 34,
+                Visible = true,
+                Enabled = true,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(41, 142, 98),
+                ForeColor = Color.White,
+                UseVisualStyleBackColor = false,
+                Margin = new Padding(0, 3, 0, 0),
+            };
+            _updateButton.FlatAppearance.BorderSize = 0;
+            _updateButton.Click += delegate { OnUpdateRequested(); };
+
+            var updateControls = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Right,
+                Width = 346,
+                Height = 40,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+            };
+            updateControls.Controls.Add(_updateReleaseBox);
+            updateControls.Controls.Add(_updateButton);
+
+            footerRow.Controls.Add(updateStatusPanel);
+            footerRow.Controls.Add(updateControls);
             footerRow.Controls.Add(exitButton);
 
-            mainPanel.Controls.Add(cards);
-            mainPanel.Controls.Add(actionPanel);
-            mainPanel.Controls.Add(footerRow);
-            mainPanel.Controls.Add(footer);
-            mainPanel.Controls.Add(subtitle);
-            mainPanel.Controls.Add(header);
+            _mainPanel.Controls.Add(header, 0, 0);
+            _mainPanel.Controls.Add(subtitle, 0, 1);
+            _mainPanel.Controls.Add(actionPanel, 0, 2);
+            _mainPanel.Controls.Add(_uiSuitePanel, 0, 3);
+            _mainPanel.Controls.Add(footer, 0, 4);
+            _mainPanel.Controls.Add(footerRow, 0, 5);
 
             layout.Controls.Add(heroPanel, 0, 0);
-            layout.Controls.Add(mainPanel, 1, 0);
+            layout.Controls.Add(_mainPanel, 1, 0);
 
-            AcceptButton = _executeSelectionButton;
+            AcceptButton = _launchButton;
         }
 
         private string GetPackageRoot()
         {
-            return Path.GetDirectoryName(Application.ExecutablePath) ?? string.Empty;
+            var exeDir = Path.GetDirectoryName(Application.ExecutablePath) ?? string.Empty;
+            var appDir = Path.Combine(exeDir, "app");
+            return Directory.Exists(appDir) ? appDir : exeDir;
+        }
+
+        private static Size GetScaledClientSize(int baseWidth, int baseHeight)
+        {
+            var workingArea = Screen.PrimaryScreen.WorkingArea;
+            var width = Math.Max(1, Math.Min(baseWidth, workingArea.Width - 40));
+            var height = Math.Max(1, Math.Min(baseHeight, workingArea.Height - 40));
+            return new Size(width, height);
+        }
+
+        private static float GetDisplayScaleFactor()
+        {
+            try
+            {
+                using (var graphics = Graphics.FromHwnd(IntPtr.Zero))
+                {
+                    if (graphics != null && graphics.DpiX > 0)
+                    {
+                        return graphics.DpiX / 96F;
+                    }
+                }
+            }
+            catch
+            {
+                // Fall back to 1.0 when the desktop DPI cannot be queried.
+            }
+
+            return 1F;
         }
 
         private string GetHomeDir()
         {
             return Path.Combine(GetPackageRoot(), "home");
-        }
-
-        private string GetLauncherSelectionPath()
-        {
-            return Path.Combine(GetHomeDir(), "launcher-selected.txt");
         }
 
         private string GetLauncherActionsPath()
@@ -2497,40 +4676,12 @@ internal sealed class HermesBootstrap
                 "; custom-qwen|Custom: Qwen 3B|Switch to qwen2.5:3b local model|preset|provider=ollama;model=qwen2.5:3b;baseUrl=http://127.0.0.1:11434/v1",
                 "; custom-work|Custom: Open Work Folder|Open your own work folder|folder|E:\\AI\\hermes",
                 string.Empty,
+                "; UI 套件主入口已经集成到 HermesGo.exe 里。",
+                "; 需要说明时直接打开 app\\ui-suite\\docs\\README.md。",
+                string.Empty,
             });
 
             File.WriteAllText(path, template, Encoding.UTF8);
-        }
-
-        private string LoadSavedLauncherSelectionKey()
-        {
-            try
-            {
-                var path = GetLauncherSelectionPath();
-                if (!File.Exists(path))
-                {
-                    return string.Empty;
-                }
-
-                return File.ReadAllText(path, Encoding.UTF8).Trim();
-            }
-            catch
-            {
-                return string.Empty;
-            }
-        }
-
-        private void SaveSelectedLauncherKey(string key)
-        {
-            try
-            {
-                Directory.CreateDirectory(GetHomeDir());
-                File.WriteAllText(GetLauncherSelectionPath(), key ?? string.Empty, Encoding.UTF8);
-            }
-            catch
-            {
-                // Ignore selection persistence failures.
-            }
         }
 
         private static string NormalizeLauncherKey(string value)
@@ -2631,79 +4782,57 @@ internal sealed class HermesBootstrap
             var builtIns = new List<LauncherOption>();
             builtIns.Add(new LauncherOption
             {
-                Key = "beginner",
-                Text = "Beginner: Local Start",
-                Description = "作用：保留默认的本地 Ollama 2B 模式，直接启动 HermesGo 的聊天流程，适合第一次使用的人。\r\n怎么用：选中后点“启动”，程序会先检查本地默认配置，再打开常规聊天界面和浏览器窗口。\r\n适合谁：只想尽快能用，不想先改模型、不想碰复杂配置的用户。",
-                Kind = "beginner",
+                Key = "full-3ui",
+                Text = "启动三件套（Dashboard + WebUI + Desktop）",
+                Description = "与 HermesGo.bat 相同：启动 Start-HermesGo.ps1，打开 Dashboard、WebUI 和 Desktop。",
+                Kind = "full-3ui",
             });
             builtIns.Add(new LauncherOption
             {
-                Key = "cloud",
-                Text = "Cloud: GPT-5.4 Mini",
-                Description = "作用：把当前包切到 OpenAI Codex 路线，默认模型改成 gpt-5.4-mini。已登录时直接继续启动，未登录时才打开浏览器里的 Codex 登录页。\r\n怎么用：选中后点“启动”。如果还没登录，启动器会先带你走登录流程；登录成功后再继续切到云端模型。\r\n适合谁：想用云端模型、需要更强能力、愿意做在线登录的用户。",
-                Kind = "cloud",
+                Key = "webui-only",
+                Text = "仅 WebUI",
+                Description = "与 HermesWebUI.bat 相同，只启动聊天 WebUI（8787）。",
+                Kind = "webui-only",
             });
             builtIns.Add(new LauncherOption
             {
-                Key = "expert",
-                Text = "Expert: Dashboard Only",
-                Description = "作用：只启动 Dashboard 和后台服务，不主动弹聊天窗口，便于高级用户自己调参数和看日志。\r\n怎么用：选中后点“启动”，浏览器会直接进入配置页。你可以在 Dashboard 里切模型、看状态、改路径、查日志。\r\n适合谁：已经知道自己在干什么的人，或者需要排查问题的人。",
-                Kind = "expert",
-            });
-            builtIns.Add(new LauncherOption
-            {
-                Key = "switch-model",
-                Text = "Utility: Switch Local Model",
-                Description = "作用：打开本地模型切换脚本，用来改 Ollama 离线模型，比如 gemma、qwen 这类本地模型。\r\n怎么用：如果你要换离线模型，就选这个项。脚本会单独打开一个窗口，让你按提示选择要切到哪个本地模型，然后写入本地配置。\r\n适合谁：离线使用者，或者还在用本地 2B 模型但想换其他本地模型的人。",
-                Kind = "switch-model",
+                Key = "desktop-only",
+                Text = "仅 Desktop",
+                Description = "与 HermesDesktop.bat 相同，只启动 Electron 桌面端。",
+                Kind = "desktop-only",
             });
             builtIns.Add(new LauncherOption
             {
                 Key = "verify",
-                Text = "Utility: Self Check",
-                Description = "作用：运行绿色包自检，检查启动器、图标、模型目录、Dashboard 入口和日志是否正常。\r\n怎么用：更新完包以后先跑这个项。它会帮你确认文件结构有没有问题，适合在正式发给别人之前做最后确认。\r\n适合谁：打包维护者、测试人员、想确认包是否完整的人。",
+                Text = "自检",
+                Description = "运行 Verify-HermesGo，不进入主界面。",
                 Kind = "verify",
             });
             builtIns.Add(new LauncherOption
             {
-                Key = "codex-login",
-                Text = "Utility: Codex Login",
-                Description = "作用：运行 bundled 的 codex login，给 HermesGo 写入 OpenAI / Codex 的授权状态。\r\n怎么用：如果你要用云端能力，先选这个项完成登录。登录成功后再回到 Cloud: GPT-5.4 Mini 或 Dashboard 继续启动。\r\n适合谁：需要登录 OpenAI 账号，但不想手动找命令行的人。",
-                Kind = "codex-login",
-            });
-            builtIns.Add(new LauncherOption
-            {
                 Key = "open-home",
-                Text = "Open: Home Folder",
-                Description = "作用：直接打开 home 目录，里面通常放 config.yaml、session、记忆和运行状态文件。\r\n怎么用：如果你要人工查看配置，就选这个项。打开后可以直接看文件，不需要手动去找路径。\r\n适合谁：需要检查配置文件、备份状态、或手工排错的人。",
+                Text = "打开 home 目录",
+                Description = "打开绿色版 home 目录（配置与数据）。",
                 Kind = "open-home",
             });
             builtIns.Add(new LauncherOption
             {
                 Key = "open-logs",
-                Text = "Open: Logs Folder",
-                Description = "作用：直接打开 logs 目录，方便查看启动日志、更新日志和 Dashboard 日志。\r\n怎么用：遇到启动失败、模型切换失败或浏览器没打开时，先点这个项，再看最新日志文件。\r\n适合谁：排查问题的人，或者想确认程序有没有正常运行的人。",
+                Text = "打开 logs 目录",
+                Description = "打开绿色版 logs 目录。",
                 Kind = "open-logs",
-            });
-            builtIns.Add(new LauncherOption
-            {
-                Key = "open-custom-actions",
-                Text = "Open: Custom Actions File",
-                Description = "作用：直接打开自定义动作文件，方便你新增自己的启动类型。\r\n怎么用：先点这个项，再编辑 home\\launcher-actions.txt。下一次启动时，文件里的自定义动作会自动出现在菜单里。\r\n适合谁：想自己扩展启动器的人。",
-                Kind = "open-custom-actions",
             });
 
             _launcherOptions.AddRange(builtIns);
             _launcherOptions.AddRange(LoadCustomLauncherOptions());
 
-            var savedKey = LoadSavedLauncherSelectionKey();
             _selectionBox.Items.Clear();
             var orderedOptions = new List<LauncherOption>(_launcherOptions);
-            var defaultKey = string.Equals(state != null ? state.Provider : string.Empty, "openai-codex", StringComparison.OrdinalIgnoreCase)
-                ? "cloud"
-                : "beginner";
-            var preferredKey = string.IsNullOrWhiteSpace(savedKey) ? defaultKey : savedKey;
+            var defaultKey = "full-3ui";
+
+            var preferredKey = defaultKey;
             var selected = orderedOptions.FirstOrDefault(item => string.Equals(item.Key, preferredKey, StringComparison.OrdinalIgnoreCase))
+                ?? orderedOptions.FirstOrDefault(item => string.Equals(item.Key, defaultKey, StringComparison.OrdinalIgnoreCase))
                 ?? orderedOptions.FirstOrDefault();
             if (selected != null)
             {
@@ -2727,13 +4856,34 @@ internal sealed class HermesBootstrap
 
         private void UpdateSelectionDescription()
         {
+            RefreshLaunchTarget();
             if (_selectionDescription == null)
             {
                 return;
             }
 
             var option = GetSelectedLauncherOption();
-            _selectionDescription.Text = option != null ? BuildSelectionDescription(option) : string.Empty;
+            _selectionDescription.Text = option != null ? BuildSelectionSummary(option) : string.Empty;
+        }
+
+        private void SetLaunchTarget(LaunchTarget target)
+        {
+            _launchTarget = target;
+            if (_launchButton != null)
+            {
+                _launchButton.Text = target == LaunchTarget.UiSuite ? "启动 UI" : "启动";
+            }
+        }
+
+        private void ExecuteCurrentLaunch()
+        {
+            if (_launchTarget == LaunchTarget.UiSuite)
+            {
+                RaiseUiSuiteLaunchRequested();
+                return;
+            }
+
+            ExecuteSelectedAction();
         }
 
         private void ExecuteSelectedAction()
@@ -2744,37 +4894,40 @@ internal sealed class HermesBootstrap
                 return;
             }
 
-            SaveSelectedLauncherKey(option.Key);
-
-            switch (option.Key)
+            if (string.Equals(option.Key, "full-3ui", StringComparison.OrdinalIgnoreCase))
             {
-                case "beginner":
-                    OnBeginnerRequested();
-                    return;
-                case "cloud":
-                    OnCloudRequested();
-                    return;
-                case "expert":
-                    OnExpertRequested();
-                    return;
-                case "switch-model":
-                    OnSwitchModelRequested();
-                    return;
-                case "verify":
-                    OnVerifyRequested();
-                    return;
-                case "codex-login":
-                    OnCodexLoginRequested();
-                    return;
-                case "open-home":
-                    OnOpenHomeRequested();
-                    return;
-                case "open-logs":
-                    OnOpenLogsRequested();
-                    return;
-                case "open-custom-actions":
-                    OnOpenCustomActionsRequested();
-                    return;
+                OnFullLaunchRequested();
+                return;
+            }
+
+            if (string.Equals(option.Key, "webui-only", StringComparison.OrdinalIgnoreCase))
+            {
+                OnWebUiOnlyRequested();
+                return;
+            }
+
+            if (string.Equals(option.Key, "desktop-only", StringComparison.OrdinalIgnoreCase))
+            {
+                OnDesktopOnlyRequested();
+                return;
+            }
+
+            if (string.Equals(option.Key, "verify", StringComparison.OrdinalIgnoreCase))
+            {
+                OnVerifyRequested();
+                return;
+            }
+
+            if (string.Equals(option.Key, "open-home", StringComparison.OrdinalIgnoreCase))
+            {
+                OnOpenHomeRequested();
+                return;
+            }
+
+            if (string.Equals(option.Key, "open-logs", StringComparison.OrdinalIgnoreCase))
+            {
+                OnOpenLogsRequested();
+                return;
             }
 
             if (option.IsCustom)
@@ -2822,6 +4975,28 @@ internal sealed class HermesBootstrap
             return string.Join(Environment.NewLine, lines.ToArray());
         }
 
+        private string BuildSelectionSummary(LauncherOption option)
+        {
+            var lines = new List<string>();
+            var description = option.Description ?? string.Empty;
+            var firstLine = description
+                .Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+                .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
+            if (!string.IsNullOrWhiteSpace(firstLine))
+            {
+                lines.Add(firstLine.Trim());
+            }
+
+            var statusLines = BuildSelectionStatusLines(option);
+            if (statusLines.Count > 0)
+            {
+                lines.Add("当前检测：" + string.Join("；", statusLines.ToArray()));
+            }
+
+            lines.Add("更新功能在窗口底部。");
+            return string.Join(Environment.NewLine, lines.ToArray());
+        }
+
         private List<string> BuildSelectionStatusLines(LauncherOption option)
         {
             var lines = new List<string>();
@@ -2839,15 +5014,28 @@ internal sealed class HermesBootstrap
                 lines.Add(state.IsLocalPreset
                     ? "当前状态：本地默认配置已就绪，直接启动即可。"
                     : "当前状态：不是本地默认配置，点“启动”后会先写回本地 2B 配置，再启动。");
+                if (ShouldUseUiSuiteLaunch())
+                {
+                    lines.Add("组合启动：当前选中的 UI 套件会和这个预设一起执行。");
+                }
             }
             else if (string.Equals(option.Key, "cloud", StringComparison.OrdinalIgnoreCase))
             {
                 lines.Add(state.HasCodexAuth
-                    ? "Codex 登录：已就绪。"
-                    : "Codex 登录：未就绪，点“启动”会先打开登录流程。");
-                lines.Add(state.IsCloudPreset
-                    ? "当前状态：Cloud 默认配置已对齐。"
-                    : "当前状态：会先把模型切到 gpt-5.4-mini 再启动。");
+                    ? "OpenAI 登录：已就绪。"
+                    : "OpenAI 登录：未就绪，点“启动”会先打开登录流程。");
+                if (string.Equals(model, "gpt-5.4-mini", StringComparison.OrdinalIgnoreCase))
+                {
+                    lines.Add("当前状态：Cloud 默认配置已对齐到 gpt-5.4 mini。");
+                }
+                else
+                {
+                    lines.Add("当前状态：会先把模型切回 gpt-5.4 mini 再启动。");
+                }
+                if (ShouldUseUiSuiteLaunch())
+                {
+                    lines.Add("组合启动：当前选中的 UI 套件会和这个预设一起执行。");
+                }
             }
             else if (string.Equals(option.Key, "expert", StringComparison.OrdinalIgnoreCase))
             {
@@ -2864,8 +5052,8 @@ internal sealed class HermesBootstrap
             else if (string.Equals(option.Key, "codex-login", StringComparison.OrdinalIgnoreCase))
             {
                 lines.Add(state.HasCodexAuth
-                    ? "Codex 登录：已检测到有效授权。"
-                    : "Codex 登录：未检测到有效授权，启动后会打开登录流程。");
+                    ? "OpenAI 登录：已检测到有效授权。"
+                    : "OpenAI 登录：未检测到有效授权，启动后会打开登录流程。");
             }
             else if (string.Equals(option.Key, "open-home", StringComparison.OrdinalIgnoreCase))
             {
@@ -2901,8 +5089,12 @@ internal sealed class HermesBootstrap
                     if (string.Equals(providerValue, "openai-codex", StringComparison.OrdinalIgnoreCase))
                     {
                         lines.Add(state.HasCodexAuth
-                            ? "Codex 登录：已就绪，启动后会直接继续。"
-                            : "Codex 登录：未就绪，启动后会先走登录流程。");
+                            ? "OpenAI 登录：已就绪，启动后会直接继续。"
+                            : "OpenAI 登录：未就绪，启动后会先弹出配置确认框，再走登录流程。");
+                    }
+                    if (ShouldUseUiSuiteLaunch())
+                    {
+                        lines.Add("组合启动：当前选中的 UI 套件会和这个预设一起执行。");
                     }
                 }
                 else if (string.Equals(option.Kind, "script", StringComparison.OrdinalIgnoreCase))
@@ -2926,9 +5118,24 @@ internal sealed class HermesBootstrap
         {
             try
             {
-                var logoPath = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? string.Empty, "HermesGo-logo.png");
-                if (File.Exists(logoPath))
+                var exeDir = Path.GetDirectoryName(Application.ExecutablePath) ?? string.Empty;
+                var contentRoot = Directory.Exists(Path.Combine(exeDir, "app"))
+                    ? Path.Combine(exeDir, "app")
+                    : exeDir;
+                var logoCandidates = new[]
                 {
+                    Path.Combine(contentRoot, "assets", "HermesGo-logo.png"),
+                    Path.Combine(contentRoot, "assets", "branding", "HermesGo-logo.png"),
+                    Path.Combine(exeDir, "HermesGo-logo.png"),
+                };
+
+                foreach (var logoPath in logoCandidates)
+                {
+                    if (!File.Exists(logoPath))
+                    {
+                        continue;
+                    }
+
                     using (var stream = File.OpenRead(logoPath))
                     using (var image = Image.FromStream(stream))
                     {
@@ -3015,9 +5222,169 @@ internal sealed class HermesBootstrap
             return card;
         }
 
+        private void BuildUiSuitePanel()
+        {
+            if (_uiSuitePanel != null)
+            {
+                return;
+            }
+
+            _uiSuitePanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Visible = false,
+                Height = 0,
+                BackColor = BackColor,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+            };
+
+            if (_mainPanel != null && _mainPanel.RowStyles.Count > 3)
+            {
+                _mainPanel.RowStyles[3] = new RowStyle(SizeType.Absolute, 0F);
+            }
+        }
+
+        private void UpdateUiSuiteDialogDescriptions()
+        {
+            RefreshLaunchTarget();
+            if (_uiSuiteUiDescription == null)
+            {
+                return;
+            }
+
+            if (_uiSuiteHintLabel != null)
+            {
+                var selectedUi = GetSelectedUiSuiteUi();
+                _uiSuiteHintLabel.ForeColor = Color.FromArgb(102, 98, 88);
+                if (selectedUi != null && !string.Equals(selectedUi.Id, "00", StringComparison.OrdinalIgnoreCase))
+                {
+                    _uiSuiteHintLabel.Text = ShouldUseUiSuiteLaunch()
+                        ? "当前选择会按“预设 + UI 套件”组合启动；浏览器和 Hermes CLI 复选框默认都勾选。"
+                        : "当前选中的 UI 会保留主启动区；只有 Beginner / Cloud 这类预设会和 UI 套件组合启动。";
+                }
+                else
+                {
+                    _uiSuiteHintLabel.Text = "选中 00 原版时，主按钮按主启动区执行；浏览器和 Hermes CLI 复选框默认都勾选。";
+                }
+            }
+
+            var ui = GetSelectedUiSuiteUi();
+            if (ui != null)
+            {
+                _uiSuiteUiDescription.Text = string.Join(Environment.NewLine, new[]
+                {
+                    "ID: " + ui.Id,
+                    "Name: " + ui.Name,
+                    "Entry: " + ui.DefaultUrl,
+                    string.Empty,
+                    ui.Description ?? string.Empty,
+                });
+            }
+            else
+            {
+                _uiSuiteUiDescription.Text = string.Empty;
+            }
+        }
+
+        private UiSuiteUiItem GetSelectedUiSuiteUi()
+        {
+            return _uiSuiteListBox != null ? _uiSuiteListBox.SelectedItem as UiSuiteUiItem : null;
+        }
+
+        private UiSuiteSelection BuildUiSuiteSelection()
+        {
+            return new UiSuiteSelection
+            {
+                Ui = GetSelectedUiSuiteUi(),
+                MainAction = GetSelectedLauncherOption(),
+                AutoOpenBrowser = _uiSuiteBrowserCheckBox == null || _uiSuiteBrowserCheckBox.Checked,
+                AutoOpenChat = _uiSuiteChatCheckBox == null || _uiSuiteChatCheckBox.Checked,
+            };
+        }
+
+        private void RaiseUiSuiteLaunchRequested()
+        {
+            var selection = BuildUiSuiteSelection();
+            if (selection.Ui == null)
+            {
+                if (_uiSuiteHintLabel != null)
+                {
+                    _uiSuiteHintLabel.ForeColor = Color.FromArgb(160, 72, 48);
+                    _uiSuiteHintLabel.Text = "请先选择一个 UI，再点顶部启动按钮。";
+                }
+                return;
+            }
+
+            var handler = UiSuiteLaunchRequested;
+            if (handler != null)
+            {
+                handler(this, selection);
+            }
+        }
+
+        private bool IsPresetLauncherOption(LauncherOption option)
+        {
+            if (option == null)
+            {
+                return false;
+            }
+
+            if (string.Equals(option.Key, "beginner", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(option.Key, "cloud", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return option.IsCustom && string.Equals(option.Kind, "preset", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private bool ShouldUseUiSuiteLaunch()
+        {
+            var ui = GetSelectedUiSuiteUi();
+            if (ui == null || string.Equals(ui.Id, "00", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return IsPresetLauncherOption(GetSelectedLauncherOption());
+        }
+
+        private void RefreshLaunchTarget()
+        {
+            SetLaunchTarget(ShouldUseUiSuiteLaunch() ? LaunchTarget.UiSuite : LaunchTarget.MainAction);
+        }
+
         private void OnBeginnerRequested()
         {
             var handler = BeginnerRequested;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+
+        private void OnFullLaunchRequested()
+        {
+            var handler = FullLaunchRequested;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+
+        private void OnWebUiOnlyRequested()
+        {
+            var handler = WebUiOnlyRequested;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+
+        private void OnDesktopOnlyRequested()
+        {
+            var handler = DesktopOnlyRequested;
             if (handler != null)
             {
                 handler(this, EventArgs.Empty);
@@ -3108,6 +5475,123 @@ internal sealed class HermesBootstrap
         private void OnExitRequested()
         {
             var handler = ExitRequested;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+
+        public void SetUpdateStatus(string text, bool ready, bool showButton, ReleaseInfo release)
+        {
+            _updateReady = ready;
+            if (_updateStatusLabel != null)
+            {
+                _updateStatusLabel.Text = text ?? string.Empty;
+            }
+
+            if (_updateProgressBar != null)
+            {
+                var busy = !ready && !showButton;
+                _updateProgressBar.Visible = busy;
+                if (busy)
+                {
+                    _updateProgressBar.Style = ProgressBarStyle.Marquee;
+                    _updateProgressBar.MarqueeAnimationSpeed = 24;
+                }
+            }
+
+            if (_updateButton != null)
+            {
+                _updateButton.Visible = showButton;
+            }
+
+            if (!showButton)
+            {
+                _pendingUpdate = null;
+            }
+            else if (_pendingUpdate == null && release != null)
+            {
+                _pendingUpdate = release;
+            }
+
+            UpdateSelectedUpdateRelease();
+        }
+
+        public void SetAvailableUpdateReleases(IReadOnlyList<ReleaseInfo> releases)
+        {
+            _availableUpdateReleases.Clear();
+            if (releases != null)
+            {
+                foreach (var release in releases)
+                {
+                    if (release != null)
+                    {
+                        _availableUpdateReleases.Add(release);
+                    }
+                }
+            }
+
+            if (_updateReleaseBox != null)
+            {
+                _updateReleaseBox.BeginUpdate();
+                try
+                {
+                    _updateReleaseBox.Items.Clear();
+                    foreach (var release in _availableUpdateReleases)
+                    {
+                        _updateReleaseBox.Items.Add(release);
+                    }
+
+                    _updateReleaseBox.Visible = _availableUpdateReleases.Count > 1;
+                    _updateReleaseBox.Enabled = _availableUpdateReleases.Count > 0;
+                    if (_availableUpdateReleases.Count == 1)
+                    {
+                        _updateReleaseBox.SelectedIndex = 0;
+                    }
+                    else if (_availableUpdateReleases.Count > 1)
+                    {
+                        _updateReleaseBox.SelectedIndex = -1;
+                    }
+                }
+                finally
+                {
+                    _updateReleaseBox.EndUpdate();
+                }
+            }
+
+            _pendingUpdate = _availableUpdateReleases.Count == 1 ? _availableUpdateReleases[0] : null;
+            UpdateSelectedUpdateRelease();
+        }
+
+        private void UpdateSelectedUpdateRelease()
+        {
+            if (_updateReleaseBox != null && _updateReleaseBox.SelectedIndex >= 0 && _updateReleaseBox.SelectedIndex < _availableUpdateReleases.Count)
+            {
+                _pendingUpdate = _availableUpdateReleases[_updateReleaseBox.SelectedIndex];
+            }
+            else if (_availableUpdateReleases.Count == 0)
+            {
+                _pendingUpdate = null;
+            }
+
+            if (_updateButton != null)
+            {
+                if (_availableUpdateReleases.Count == 0)
+                {
+                    _updateButton.Text = "检查更新";
+                    _updateButton.Enabled = _updateReady && _updateButton.Visible;
+                }
+                else
+                {
+                    _updateButton.Text = "更新";
+                    _updateButton.Enabled = _updateReady && _updateButton.Visible && _pendingUpdate != null;
+                }
+            }
+        }
+
+        private void OnUpdateRequested()
+        {
+            var handler = UpdateRequested;
             if (handler != null)
             {
                 handler(this, EventArgs.Empty);
@@ -3280,6 +5764,64 @@ internal sealed class HermesBootstrap
         }
 
         return false;
+    }
+
+    private sealed class ReleaseInfo
+    {
+        public string TagName { get; set; }
+        public string DisplayName { get; set; }
+        public string Body { get; set; }
+        public string SourceZipUrl { get; set; }
+        public Version AgentVersion { get; set; }
+        public List<string> ZipAssetNames { get; set; }
+        public List<string> ZipAssetUrls { get; set; }
+
+        public override string ToString()
+        {
+            if (!string.IsNullOrWhiteSpace(DisplayName))
+            {
+                return DisplayName.Trim();
+            }
+
+            return string.IsNullOrWhiteSpace(TagName) ? "release" : TagName.Trim();
+        }
+    }
+
+    private sealed class UpdateResult
+    {
+        private readonly bool _success;
+        private readonly string _message;
+        private readonly string _sourceLabel;
+        private readonly string _md5;
+        private readonly long _bytes;
+        private readonly string _summary;
+
+        private UpdateResult(bool success, string message, string sourceLabel, string md5, long bytes, string summary)
+        {
+            _success = success;
+            _message = message;
+            _sourceLabel = sourceLabel;
+            _md5 = md5;
+            _bytes = bytes;
+            _summary = summary;
+        }
+
+        public bool Success { get { return _success; } }
+        public string Message { get { return _message; } }
+        public string SourceLabel { get { return _sourceLabel; } }
+        public string Md5 { get { return _md5; } }
+        public long Bytes { get { return _bytes; } }
+        public string Summary { get { return _summary; } }
+
+        public static UpdateResult Successful(string sourceLabel, string md5, long bytes, string summary)
+        {
+            return new UpdateResult(true, string.Empty, sourceLabel, md5, bytes, summary);
+        }
+
+        public static UpdateResult Failed(string message)
+        {
+            return new UpdateResult(false, message, string.Empty, string.Empty, 0, string.Empty);
+        }
     }
 
     private void Log(string message)

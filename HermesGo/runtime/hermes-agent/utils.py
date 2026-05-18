@@ -7,6 +7,7 @@ import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Union
+from urllib.parse import urlparse
 
 import yaml
 
@@ -55,6 +56,15 @@ def _restore_file_mode(path: Path, mode: "int | None") -> None:
         os.chmod(path, mode)
     except OSError:
         pass
+
+
+def atomic_replace(src: Union[str, Path], dst: Union[str, Path]) -> None:
+    """Atomically replace *dst* with *src* and preserve the destination mode."""
+    src_path = Path(src)
+    dst_path = Path(dst)
+    original_mode = _preserve_file_mode(dst_path)
+    os.replace(src_path, dst_path)
+    _restore_file_mode(dst_path, original_mode)
 
 
 def atomic_json_write(
@@ -194,3 +204,54 @@ def env_int(key: str, default: int = 0) -> int:
 def env_bool(key: str, default: bool = False) -> bool:
     """Read an environment variable as a boolean."""
     return is_truthy_value(os.getenv(key, ""), default=default)
+
+
+# ─── Proxy Helpers ────────────────────────────────────────────────────────────
+
+
+_PROXY_ENV_KEYS = (
+    "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+    "https_proxy", "http_proxy", "all_proxy",
+)
+
+
+def normalize_proxy_url(proxy_url: str | None) -> str | None:
+    """Normalize proxy URLs for httpx/aiohttp compatibility."""
+    candidate = str(proxy_url or "").strip()
+    if not candidate:
+        return None
+    if candidate.lower().startswith("socks://"):
+        return f"socks5://{candidate[len('socks://'):]}"
+    return candidate
+
+
+def normalize_proxy_env_vars() -> None:
+    """Rewrite supported proxy env vars to canonical URL forms in-place."""
+    for key in _PROXY_ENV_KEYS:
+        value = os.getenv(key, "")
+        normalized = normalize_proxy_url(value)
+        if normalized and normalized != value:
+            os.environ[key] = normalized
+
+
+# ─── URL Parsing Helpers ──────────────────────────────────────────────────────
+
+
+def base_url_hostname(base_url: str) -> str:
+    """Return the lowercased hostname for a base URL, or ``""`` if absent."""
+    raw = (base_url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    return (parsed.hostname or "").lower().rstrip(".")
+
+
+def base_url_host_matches(base_url: str, domain: str) -> bool:
+    """Return True when the base URL's hostname is ``domain`` or a subdomain."""
+    hostname = base_url_hostname(base_url)
+    if not hostname:
+        return False
+    domain = (domain or "").strip().lower().rstrip(".")
+    if not domain:
+        return False
+    return hostname == domain or hostname.endswith("." + domain)

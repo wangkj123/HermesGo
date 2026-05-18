@@ -18,6 +18,8 @@ $sourceOllama = Join-Path $repoRoot "HermesGo\runtime\ollama"
 $sourceBundledOllamaData = Join-Path $repoRoot "HermesGo\data\ollama"
 $sourceBundledOllamaModels = Join-Path $sourceBundledOllamaData "models"
 $sourceOllamaZip = Join-Path $repoRoot "HermesGo\installers\ollama-windows-amd64.zip"
+$sourceUiSuite = Join-Path $repoRoot "exports\selftest-official-run\app\ui-suite"
+$sourceUiSuiteScripts = Join-Path $repoRoot "exports\selftest-official-run\app\scripts"
 $sourceSitePackages = Join-Path $sourceHermes "venv\Lib\site-packages"
 $docsDir = Join-Path $builderRoot "docs"
 $cacheDir = Join-Path $builderRoot "cache"
@@ -115,6 +117,38 @@ function Remove-PathIfExists {
     }
 }
 
+function Remove-TreeRobust {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    $emptySeed = Join-Path ([System.IO.Path]::GetTempPath()) ("hermesgo-empty-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $emptySeed -Force | Out-Null
+    try {
+        & robocopy $emptySeed $Path /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            throw "robocopy clean failed ($LASTEXITCODE): $Path"
+        }
+    } finally {
+        Remove-Item -LiteralPath $emptySeed -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Path) {
+        $longPath = "\\?\$Path"
+        & cmd.exe /c "rmdir /s /q `"$longPath`"" | Out-Null
+    }
+
+    if (Test-Path -LiteralPath $Path) {
+        $parent = Split-Path -Parent $Path
+        $name = Split-Path -Leaf $Path
+        $stalePath = Join-Path $parent ($name + "-stale-" + (Get-Date -Format "yyyyMMddHHmmss"))
+        Move-Item -LiteralPath $Path -Destination $stalePath -Force
+    }
+}
+
 function Write-Utf8File {
     param(
         [string]$Path,
@@ -130,8 +164,23 @@ function Stop-ProcessesUnderPath {
     param([string]$PathPrefix)
 
     $normalized = ($PathPrefix.TrimEnd('\') + '\').ToLowerInvariant()
+    $normalizedForCommandLine = $normalized.Replace('\', '\\')
+    $currentProcessId = $PID
     Get-CimInstance Win32_Process | Where-Object {
-        $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($normalized)
+        if ($_.ProcessId -eq $currentProcessId) {
+            return $false
+        }
+
+        if ($_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($normalized)) {
+            return $true
+        }
+
+        if ($_.CommandLine) {
+            $commandLine = $_.CommandLine.ToLowerInvariant()
+            return $commandLine.Contains($normalized) -or $commandLine.Contains($normalizedForCommandLine)
+        }
+
+        return $false
     } | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
@@ -628,18 +677,24 @@ function Reset-OutputHomeState {
     }
 }
 
-$runtimePythonDir = Join-Path $OutputDir "runtime\python311"
-$runtimeHermesDir = Join-Path $OutputDir "runtime\hermes-agent"
-$runtimeOllamaDir = Join-Path $OutputDir "runtime\ollama"
-$outputOllamaDataDir = Join-Path $OutputDir "data\ollama"
+$appDir = Join-Path $OutputDir "app"
+$scriptsDir = Join-Path $appDir "scripts"
+$toolsDir = Join-Path $appDir "tools"
+$docsOutputDir = Join-Path $appDir "docs"
+$assetsDir = Join-Path $appDir "assets"
+$assetsIconsDir = Join-Path $assetsDir "icons"
+$runtimePythonDir = Join-Path $appDir "runtime\python311"
+$runtimeHermesDir = Join-Path $appDir "runtime\hermes-agent"
+$runtimeOllamaDir = Join-Path $appDir "runtime\ollama"
+$outputOllamaDataDir = Join-Path $appDir "data\ollama"
 $outputOllamaModelsDir = Join-Path $outputOllamaDataDir "models"
-$installersDir = Join-Path $OutputDir "installers"
+$installersDir = Join-Path $appDir "installers"
 $embedSource = Ensure-EmbedPythonZip
 
 if ($Clean) {
     Write-Step "Cleaning previous output."
     Stop-ProcessesUnderPath -PathPrefix $OutputDir
-    Remove-Item -LiteralPath $OutputDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-TreeRobust -Path $OutputDir
 }
 
 Write-Step "Expanding embeddable Python from $($embedSource.Source)"
@@ -664,16 +719,26 @@ if (Test-Path -LiteralPath $sourceOllama) {
     Write-Step "Bundled Ollama runtime not found at $sourceOllama"
 }
 
-if (Test-OllamaModelPresent -ModelsDir $sourceBundledOllamaModels -ModelName $defaultOllamaModel) {
-    Write-Step "Copying bundled Ollama models"
+$requiresBundledDefaultOllamaModel = [string]::IsNullOrWhiteSpace($defaultOllamaProvider) -or $defaultOllamaProvider -ieq "ollama"
+if ($requiresBundledDefaultOllamaModel) {
+    if (Test-OllamaModelPresent -ModelsDir $sourceBundledOllamaModels -ModelName $defaultOllamaModel) {
+        Write-Step "Copying bundled Ollama models"
+        Copy-Tree -Source $sourceBundledOllamaData -Destination $outputOllamaDataDir
+    }
+    else {
+        throw "Bundled Ollama model missing: $defaultOllamaModel under $sourceBundledOllamaModels"
+    }
+}
+elseif (Test-Path -LiteralPath $sourceBundledOllamaData) {
+    Write-Step "Copying bundled Ollama data while default provider is $defaultOllamaProvider"
     Copy-Tree -Source $sourceBundledOllamaData -Destination $outputOllamaDataDir
 }
 else {
-    throw "Bundled Ollama model missing: $defaultOllamaModel under $sourceBundledOllamaModels"
+    Write-Step "Bundled Ollama data not found at $sourceBundledOllamaData"
 }
 
 Write-Step "Pruning runtime-only artifacts"
-Prune-PortablePackage -RootDir $OutputDir
+Prune-PortablePackage -RootDir $appDir
 
 $launcherBat = @'
 @echo off
@@ -687,7 +752,7 @@ $setupOllamaBat = @'
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "ROOT=%~dp0"
+for %%I in ("%~dp0..") do set "ROOT=%%~fI\"
 set "MODEL_NAME=__DEFAULT_OLLAMA_MODEL__"
 if exist "%ROOT%home\portable-defaults.txt" (
     for /f "usebackq tokens=1,* delims==" %%A in ("%ROOT%home\portable-defaults.txt") do (
@@ -746,6 +811,9 @@ param(
     [switch]$NoOpenBrowser,
     [switch]$NoOpenChat,
     [string]$OAuthProvider = "",
+    [string]$ChatProvider = "",
+    [string]$ChatModel = "",
+    [switch]$PlanOnly,
     [int]$DashboardTimeoutSec = 45
 )
 
@@ -768,15 +836,16 @@ function Resolve-PortablePath {
     return $trimmed
 }
 
-$root = Resolve-PortablePath -Path $PSScriptRoot
+$root = Resolve-PortablePath -Path ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..")))
 $pythonExe = Join-Path $root "runtime\python311\python.exe"
 $runtimeDir = Join-Path $root "runtime\hermes-agent"
 $homeDir = Join-Path $root "home"
 $ollamaModelsDir = Join-Path $root "data\ollama\models"
 $tmpLogDir = Join-Path $root "logs\tmp"
-$debugLog = Join-Path $root "HermesGo-debug.txt"
+$debugLog = Join-Path $root "logs\HermesGo-debug.txt"
 $dashboardOutLog = Join-Path $tmpLogDir "HermesGo-dashboard.out.txt"
 $dashboardErrLog = Join-Path $tmpLogDir "HermesGo-dashboard.err.txt"
+$commandPlanPath = Join-Path $root "logs\last-start-hermesgo-plan.json"
 $dashboardUrl = "http://127.0.0.1:9119/"
 $dashboardBrowserUrl = "http://127.0.0.1:9119/env?oauth=openai-codex"
 $headless = $env:HERMESGO_HEADLESS -eq "1"
@@ -870,6 +939,76 @@ function Apply-ProxyBypassEnvironment {
     Write-LauncherLine "NO_PROXY: $joinedEntries"
 }
 
+$script:CommandPlan = New-Object System.Collections.Generic.List[object]
+
+function Format-CommandArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return '""'
+    }
+
+    if ($Value -match '[\s"`&()]') {
+        return '"' + ($Value -replace '"', '\"') + '"'
+    }
+
+    return $Value
+}
+
+function Join-CommandLine {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList
+    )
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    [void]$parts.Add((Format-CommandArgument -Value $FilePath))
+    foreach ($argument in @($ArgumentList)) {
+        [void]$parts.Add((Format-CommandArgument -Value $argument))
+    }
+    return [string]::Join(" ", $parts)
+}
+
+function Save-CommandPlan {
+    $plan = [ordered]@{
+        schema = 1
+        generated_at = (Get-Date).ToString("o")
+        plan_only = [bool]$PlanOnly
+        source = "Start-HermesGo.ps1"
+        root = $root
+        commands = @($script:CommandPlan.ToArray())
+    }
+    $json = ($plan | ConvertTo-Json -Depth 8) -join [Environment]::NewLine
+    [System.IO.File]::WriteAllText($commandPlanPath, $json, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Add-CommandPlan {
+    param(
+        [string]$StepName,
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [hashtable]$Details = @{}
+    )
+
+    if (-not $PlanOnly) {
+        return
+    }
+
+    $entry = [ordered]@{
+        step = $script:CommandPlan.Count + 1
+        step_name = $StepName
+        file_name = $FilePath
+        argument_list = @($ArgumentList)
+        working_directory = $WorkingDirectory
+        command_line = Join-CommandLine -FilePath $FilePath -ArgumentList $ArgumentList
+        details = $Details
+    }
+    [void]$script:CommandPlan.Add($entry)
+    Save-CommandPlan
+    Write-LauncherLine ("PlanOnly command {0}: {1}" -f $entry.step, $StepName)
+}
+
 function Invoke-DirectHttpRequest {
     param(
         [string]$Uri,
@@ -912,19 +1051,59 @@ function Invoke-DirectHttpRequest {
 function Test-ListeningPort {
     param([int]$Port)
 
-    return $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $async = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne(500)) {
+            return $false
+        }
+        $client.EndConnect($async)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Close()
+    }
+}
+
+function Get-ListeningProcessIds {
+    param([int]$Port)
+
+    $ids = New-Object System.Collections.Generic.List[int]
+    try {
+        $lines = & netstat.exe -ano -p tcp 2>$null
+    }
+    catch {
+        return @()
+    }
+
+    foreach ($line in $lines) {
+        if ($line -notmatch "\sLISTENING\s+(\d+)\s*$") { continue }
+        if ($line -notmatch "[:\.]$Port\s+") { continue }
+        $pidValue = 0
+        if ([int]::TryParse($matches[1], [ref]$pidValue) -and -not $ids.Contains($pidValue)) {
+            [void]$ids.Add($pidValue)
+        }
+    }
+    return @($ids)
 }
 
 function Get-PortOwnerPath {
     param([int]$Port)
 
-    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $listener) {
+    $ownerId = Get-ListeningProcessIds -Port $Port | Select-Object -First 1
+    if (-not $ownerId) {
         return $null
     }
 
-    $process = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $listener.OwningProcess) -ErrorAction SilentlyContinue
+    $process = Get-Process -Id $ownerId -ErrorAction SilentlyContinue
+    if ($process -and $process.Path) {
+        return $process.Path
+    }
+
+    $process = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $ownerId) -ErrorAction SilentlyContinue
     return $process.ExecutablePath
 }
 
@@ -1029,9 +1208,94 @@ function Get-LocalOllamaConfig {
 
     return [pscustomobject]@{
         BaseUrl = $baseUrl
-        Port = if ($uri.Port -gt 0) { $uri.Port } else { 11434 }
+        Port = 11434
+        CompatPort = if ($uri.Port -gt 0) { $uri.Port } else { 11434 }
         Model = $model
     }
+}
+
+function Ensure-OllamaOpenAiProxyReady {
+    param(
+        [Parameter(Mandatory = $true)]
+        $OllamaConfig
+    )
+
+    if ($OllamaConfig.CompatPort -eq $OllamaConfig.Port) {
+        return
+    }
+
+    if ($PlanOnly) {
+        Add-CommandPlan `
+            -StepName "start-ollama-openai-proxy" `
+            -FilePath $pythonExe `
+            -ArgumentList @(
+                "-m", "hermes_cli.ollama_openai_proxy",
+                "--host", "127.0.0.1",
+                "--port", [string]$OllamaConfig.CompatPort,
+                "--ollama", ("http://127.0.0.1:{0}" -f $OllamaConfig.Port)
+            ) `
+            -WorkingDirectory $runtimeDir `
+            -Details @{ base_url = $OllamaConfig.BaseUrl; model = $OllamaConfig.Model }
+        return
+    }
+
+    if (Test-ListeningPort -Port $OllamaConfig.CompatPort) {
+        try {
+            $response = Invoke-DirectHttpRequest -Uri ("http://127.0.0.1:{0}/v1/models" -f $OllamaConfig.CompatPort) -TimeoutSec 3
+            if ($response.StatusCode -eq 200) {
+                Write-LauncherLine "Ollama OpenAI proxy already listening: $($OllamaConfig.BaseUrl)"
+                return
+            }
+        }
+        catch {
+        }
+
+        $listenerIds = @(Get-ListeningProcessIds -Port $OllamaConfig.CompatPort)
+        if ($listenerIds) {
+            Write-LauncherLine "Stopping stale listener on Ollama OpenAI proxy port $($OllamaConfig.CompatPort)"
+            $listenerIds | Select-Object -Unique | ForEach-Object {
+                if ($_ -and $_ -ne $PID) {
+                    Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+                }
+            }
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    $proxyOutLog = Join-Path $tmpLogDir "HermesGo-ollama-openai-proxy.out.txt"
+    $proxyErrLog = Join-Path $tmpLogDir "HermesGo-ollama-openai-proxy.err.txt"
+    Remove-Item -LiteralPath $proxyOutLog, $proxyErrLog -Force -ErrorAction SilentlyContinue
+    $proxyProcess = Start-Process -FilePath $pythonExe `
+        -ArgumentList @(
+            "-m", "hermes_cli.ollama_openai_proxy",
+            "--host", "127.0.0.1",
+            "--port", [string]$OllamaConfig.CompatPort,
+            "--ollama", ("http://127.0.0.1:{0}" -f $OllamaConfig.Port)
+        ) `
+        -WorkingDirectory $runtimeDir `
+        -RedirectStandardOutput $proxyOutLog `
+        -RedirectStandardError $proxyErrLog `
+        -WindowStyle Hidden `
+        -PassThru
+    Write-LauncherLine "Ollama OpenAI proxy launched: PID $($proxyProcess.Id), $($OllamaConfig.BaseUrl)"
+
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $response = Invoke-DirectHttpRequest -Uri ("http://127.0.0.1:{0}/v1/models" -f $OllamaConfig.CompatPort) -TimeoutSec 3
+            if ($response.StatusCode -eq 200) {
+                Write-LauncherLine "Ollama OpenAI proxy ready: $($OllamaConfig.BaseUrl)"
+                return
+            }
+        }
+        catch {
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    Add-DebugBlock -Label "ollama proxy stdout" -Path $proxyOutLog
+    Add-DebugBlock -Label "ollama proxy stderr" -Path $proxyErrLog
+    throw "Ollama OpenAI proxy failed to start on $($OllamaConfig.BaseUrl)"
 }
 
 function Ensure-LocalOllamaReady {
@@ -1046,6 +1310,17 @@ function Ensure-LocalOllamaReady {
         return
     }
 
+    if ($PlanOnly) {
+        Add-CommandPlan `
+            -StepName "start-local-ollama" `
+            -FilePath $ollamaExe `
+            -ArgumentList @("serve") `
+            -WorkingDirectory (Split-Path -Parent $ollamaExe) `
+            -Details @{ model = $ollamaConfig.Model; models_dir = $ollamaModelsDir; port = $ollamaConfig.Port }
+        Ensure-OllamaOpenAiProxyReady -OllamaConfig $ollamaConfig
+        return
+    }
+
     New-Item -ItemType Directory -Path $ollamaModelsDir -Force | Out-Null
     $env:OLLAMA_MODELS = $ollamaModelsDir
 
@@ -1053,7 +1328,7 @@ function Ensure-LocalOllamaReady {
     if (Test-ListeningPort -Port $ollamaConfig.Port) {
         $ownerPath = Resolve-PortablePath -Path (Get-PortOwnerPath -Port $ollamaConfig.Port)
         if ($ownerPath -and $ownerPath.ToLowerInvariant() -eq $ollamaExe.ToLowerInvariant()) {
-            Write-LauncherLine "Local Ollama already listening: $($ollamaConfig.BaseUrl)"
+            Write-LauncherLine "Local Ollama already listening: http://127.0.0.1:$($ollamaConfig.Port)"
             $ollamaReady = $true
         } else {
             if ($ownerPath) {
@@ -1062,9 +1337,9 @@ function Ensure-LocalOllamaReady {
                 Write-LauncherLine "Stopping unknown listener on Ollama port $($ollamaConfig.Port)"
             }
 
-            $listeners = Get-NetTCPConnection -LocalPort $ollamaConfig.Port -State Listen -ErrorAction SilentlyContinue
-            if ($listeners) {
-                $listeners | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+            $listenerIds = @(Get-ListeningProcessIds -Port $ollamaConfig.Port)
+            if ($listenerIds) {
+                $listenerIds | Select-Object -Unique | ForEach-Object {
                     if ($_ -and $_ -ne $PID) {
                         Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
                     }
@@ -1085,7 +1360,7 @@ function Ensure-LocalOllamaReady {
         $deadline = (Get-Date).AddSeconds(15)
         while ((Get-Date) -lt $deadline) {
             if (Test-ListeningPort -Port $ollamaConfig.Port) {
-                Write-LauncherLine "Local Ollama ready: $($ollamaConfig.BaseUrl)"
+                Write-LauncherLine "Local Ollama ready: http://127.0.0.1:$($ollamaConfig.Port)"
                 $ollamaReady = $true
                 break
             }
@@ -1094,16 +1369,17 @@ function Ensure-LocalOllamaReady {
     }
 
     if (-not $ollamaReady) {
-        throw "Local Ollama failed to start on $($ollamaConfig.BaseUrl)"
+        throw "Local Ollama failed to start on http://127.0.0.1:$($ollamaConfig.Port)"
     }
 
     Ensure-BundledOllamaModel -OllamaExe $ollamaExe -ModelName $ollamaConfig.Model
+    Ensure-OllamaOpenAiProxyReady -OllamaConfig $ollamaConfig
 }
 
 function Test-DashboardReady {
     try {
         $response = Invoke-DirectHttpRequest -Uri $dashboardUrl -TimeoutSec 3
-        return $response.StatusCode -eq 200 -and $response.Content -match "<title>Hermes Agent</title>"
+        return $response.StatusCode -eq 200 -and $response.Content -match "<title>Hermes Agent(?: - Dashboard)?</title>"
     } catch {
         return $false
     }
@@ -1112,14 +1388,28 @@ function Test-DashboardReady {
 function Start-DashboardProcess {
     param([string]$OAuthProvider = "")
 
+    if ($PlanOnly) {
+        $dashboardArguments = @("-m", "hermes_cli.main", "dashboard", "--host", "127.0.0.1", "--port", "9119", "--no-open")
+        if (-not [string]::IsNullOrWhiteSpace($OAuthProvider)) {
+            $dashboardArguments += @("--oauth-provider", $OAuthProvider)
+        }
+        Add-CommandPlan `
+            -StepName "start-dashboard" `
+            -FilePath $pythonExe `
+            -ArgumentList $dashboardArguments `
+            -WorkingDirectory $runtimeDir `
+            -Details @{ url = $dashboardUrl; oauth_provider = $OAuthProvider }
+        return
+    }
+
     if (Test-DashboardReady -and [string]::IsNullOrWhiteSpace($OAuthProvider)) {
         Write-LauncherLine "Dashboard already reachable: $dashboardUrl"
         return
     }
 
-    $listener = Get-NetTCPConnection -LocalPort 9119 -State Listen -ErrorAction SilentlyContinue
-    if ($listener) {
-        $listener | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+    $listenerIds = @(Get-ListeningProcessIds -Port 9119)
+    if ($listenerIds) {
+        $listenerIds | Select-Object -Unique | ForEach-Object {
             if ($_ -and $_ -ne $PID) {
                 Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
             }
@@ -1129,7 +1419,12 @@ function Start-DashboardProcess {
     Remove-Item -LiteralPath $dashboardOutLog, $dashboardErrLog -Force -ErrorAction SilentlyContinue
     $dashboardArguments = @("-m", "hermes_cli.main", "dashboard", "--host", "127.0.0.1", "--port", "9119", "--no-open")
     if (-not [string]::IsNullOrWhiteSpace($OAuthProvider)) {
-        $dashboardArguments += @("--oauth-provider", $OAuthProvider)
+        $dashboardHelp = (& $pythonExe -m hermes_cli.main dashboard --help 2>&1) -join "`n"
+        if ($dashboardHelp -match "--oauth-provider") {
+            $dashboardArguments += @("--oauth-provider", $OAuthProvider)
+        } else {
+            Write-LauncherLine "Dashboard does not support --oauth-provider; using config-driven provider selection."
+        }
     }
 
     $process = Start-Process -FilePath $pythonExe `
@@ -1162,12 +1457,22 @@ function Start-DashboardProcess {
 }
 
 function Start-ChatWindow {
-    $existing = Get-Process -Name "cmd" -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowTitle -like "*HermesGo Chat*" } |
-        Select-Object -First 1
-    if ($existing) {
-        Write-LauncherLine "Chat window already running: PID $($existing.Id)"
-        return
+    $chatTitle = "HermesGo Chat"
+    $chatArgs = ""
+    $effectiveProvider = $ChatProvider.Trim()
+    $effectiveModel = $ChatModel.Trim()
+    if ([string]::IsNullOrWhiteSpace($effectiveProvider) -and $OAuthProvider -ieq "openai-codex") {
+        $effectiveProvider = "openai-codex"
+        $effectiveModel = "gpt-5.4-mini"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($effectiveProvider) -and -not [string]::IsNullOrWhiteSpace($effectiveModel)) {
+        foreach ($value in @($effectiveProvider, $effectiveModel)) {
+            if ($value -notmatch '^[A-Za-z0-9._:/@+-]+$') {
+                throw "Unsafe chat argument value: $value"
+            }
+        }
+        $chatTitle = "HermesGo Chat - $effectiveProvider $effectiveModel"
+        $chatArgs = " chat --provider $effectiveProvider -m $effectiveModel"
     }
 
     $command = 'set PYTHONHOME=' +
@@ -1180,15 +1485,43 @@ function Start-ChatWindow {
         '&&set PYTHONUTF8=1' +
         '&&set PYTHONIOENCODING=utf-8' +
         '&&chcp 65001>nul' +
-        '&&title HermesGo Chat' +
-        '&&"' + $pythonExe + '" -m hermes_cli.main'
+        '&&title ' + $chatTitle +
+        '&&"' + $pythonExe + '" -m hermes_cli.main' + $chatArgs
+
+    if ($PlanOnly) {
+        Add-CommandPlan `
+            -StepName "start-chat-window" `
+            -FilePath "cmd.exe" `
+            -ArgumentList @("/k", $command) `
+            -WorkingDirectory $root `
+            -Details @{ title = $chatTitle; provider = $effectiveProvider; model = $effectiveModel }
+        return
+    }
+
+    $existing = Get-Process -Name "cmd" -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle -like "*HermesGo Chat*" } |
+        Select-Object -First 8
+    foreach ($process in $existing) {
+        Write-LauncherLine "Closing stale chat window before relaunch: PID $($process.Id)"
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
 
     $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $command -WorkingDirectory $root -PassThru
-    Write-LauncherLine "Chat window launched: PID $($process.Id)"
+    Write-LauncherLine "Chat window launched: PID $($process.Id), title=$chatTitle"
 }
 
 function Open-DashboardBrowser {
     param([string]$Url)
+
+    if ($PlanOnly) {
+        Add-CommandPlan `
+            -StepName "open-dashboard-browser" `
+            -FilePath "powershell.exe" `
+            -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ("Start-Process '" + $Url.Replace("'", "''") + "'")) `
+            -WorkingDirectory $root `
+            -Details @{ url = $Url }
+        return
+    }
 
     $attempts = @(
         @{
@@ -1242,6 +1575,10 @@ try {
     Write-LauncherLine "Dashboard browser URL: $dashboardBrowserUrl"
     Write-LauncherLine "Dashboard temp stdout: $dashboardOutLog"
     Write-LauncherLine "Dashboard temp stderr: $dashboardErrLog"
+    Write-LauncherLine ("PlanOnly: {0}" -f ($(if ($PlanOnly) { "yes" } else { "no" })))
+    if ($PlanOnly) {
+        Remove-Item -LiteralPath $commandPlanPath -Force -ErrorAction SilentlyContinue
+    }
 
     foreach ($requiredPath in @($pythonExe, $runtimeDir, $homeDir)) {
         if (-not (Test-Path -LiteralPath $requiredPath)) {
@@ -1271,6 +1608,11 @@ try {
         }
     }
 
+    if ($PlanOnly) {
+        Save-CommandPlan
+        Write-LauncherLine "PlanOnly command file: $commandPlanPath"
+    }
+
     Write-LauncherLine "HermesGo finished with exit code 0."
     exit 0
 } catch {
@@ -1291,18 +1633,18 @@ exit /b %ERRORLEVEL%
 $verifyPs1 = @'
 $ErrorActionPreference = "Stop"
 
-$root = $PSScriptRoot
+$root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $pythonExe = Join-Path $root "runtime\python311\python.exe"
 $runtimeBinDir = Join-Path $root "runtime\bin"
-$launcherLog = Join-Path $root "HermesGo-debug.txt"
+$launcherLog = Join-Path $root "logs\HermesGo-debug.txt"
 $tmpLogDir = Join-Path $root "logs\tmp"
 $dashboardOutLog = Join-Path $tmpLogDir "HermesGo-dashboard-verify.out.txt"
 $dashboardErrLog = Join-Path $tmpLogDir "HermesGo-dashboard-verify.err.txt"
 $dashboardUrl = "http://127.0.0.1:9119/"
 $configPath = Join-Path $root "home\config.yaml"
 $ollamaModelsDir = Join-Path $root "data\ollama\models"
-$iconPath = Join-Path $root "HermesGo.ico"
-$codexCmd = Join-Path $root "codex.cmd"
+$iconPath = Join-Path $root "assets\icons\HermesGo.ico"
+$codexCmd = Join-Path $root "tools\codex.cmd"
 $proxyBypassDefaults = @(
     "localhost",
     "127.0.0.1",
@@ -1389,6 +1731,14 @@ function Get-ConfiguredModelName {
     $modelMatch = [regex]::Match($configText, '(?m)^\s*default:\s*"?(?<v>[^"\r\n]+)"?\s*$')
     if (-not $modelMatch.Success) { return "" }
     return $modelMatch.Groups["v"].Value.Trim()
+}
+
+function Get-ConfiguredProviderName {
+    if (-not (Test-Path -LiteralPath $configPath)) { return "" }
+    $configText = Get-Content -LiteralPath $configPath -Raw -Encoding utf8
+    $providerMatch = [regex]::Match($configText, '(?m)^\s*provider:\s*"?(?<v>[^"\r\n]+)"?\s*$')
+    if (-not $providerMatch.Success) { return "" }
+    return $providerMatch.Groups["v"].Value.Trim()
 }
 
 function Get-OllamaManifestRelativePath {
@@ -1478,15 +1828,25 @@ try {
     Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
     Stop-PortListeners -Port 9119
     Stop-PortListeners -Port 11434
+    Stop-PortListeners -Port 11435
 
     $configuredModel = Get-ConfiguredModelName
-    $manifestRelativePath = Get-OllamaManifestRelativePath -ModelName $configuredModel
-    if (-not $manifestRelativePath) {
-        throw "Unable to resolve bundled Ollama manifest for model: $configuredModel"
+    $configuredProvider = Get-ConfiguredProviderName
+    if ([string]::IsNullOrWhiteSpace($configuredModel)) {
+        throw "Configured model is empty."
     }
-    $manifestPath = Join-Path $ollamaModelsDir $manifestRelativePath
-    if (-not (Test-Path -LiteralPath $manifestPath)) {
-        throw "Bundled Ollama model missing: $configuredModel ($manifestPath)"
+    $requiresBundledOllama = [string]::IsNullOrWhiteSpace($configuredProvider) -or $configuredProvider -ieq "ollama"
+    if ($requiresBundledOllama) {
+        $manifestRelativePath = Get-OllamaManifestRelativePath -ModelName $configuredModel
+        if (-not $manifestRelativePath) {
+            throw "Unable to resolve bundled Ollama manifest for model: $configuredModel"
+        }
+        $manifestPath = Join-Path $ollamaModelsDir $manifestRelativePath
+        if (-not (Test-Path -LiteralPath $manifestPath)) {
+            throw "Bundled Ollama model missing: $configuredModel ($manifestPath)"
+        }
+    } else {
+        Write-Host "External model verification mode: provider=$configuredProvider model=$configuredModel"
     }
 
     $probeJson = & $pythonExe -c "import json, sys, fastapi, uvicorn, yaml, anyio, hermes_cli.main; print(json.dumps({'exe': sys.executable, 'path': sys.path}))"
@@ -1522,22 +1882,24 @@ try {
     if ($codexLoginHelpText -match "unrecognized arguments:\s+login") {
         throw "codex login compatibility launcher still leaks the login subcommand into Hermes."
     }
-    if ($codexLoginHelpText -notmatch "Add a pooled credential") {
+    if ($codexLoginHelpText -notmatch "usage:\s+hermes auth add" -or $codexLoginHelpText -notmatch "Provider id") {
         throw "codex login help probe did not reach the Hermes auth add command."
     }
 
-    cmd /c "call `"$root\HermesGo.bat`" -NoOpenBrowser -NoOpenChat"
-    if ($LASTEXITCODE -ne 0) { throw "HermesGo.bat failed with exit code $LASTEXITCODE" }
+    cmd /c "call `"$root\scripts\HermesGo.bat`" -NoOpenBrowser -NoOpenChat"
+    if ($LASTEXITCODE -ne 0) { throw "scripts\\HermesGo.bat failed with exit code $LASTEXITCODE" }
     Assert-Contains $launcherLog "HermesGo finished with exit code 0."
     Assert-Contains $launcherLog "Ollama model store: $ollamaModelsDir"
     Assert-Contains $launcherLog "Dashboard browser URL: http://127.0.0.1:9119/env?oauth=openai-codex"
     $response = Invoke-DirectHttpRequest -Uri $dashboardUrl -TimeoutSec 5
-    if ($response.StatusCode -ne 200 -or $response.Content -notmatch "<title>Hermes Agent</title>") {
+    if ($response.StatusCode -ne 200 -or $response.Content -notmatch "<title>Hermes Agent(?: - Dashboard)?</title>") {
         throw "Dashboard probe did not return the Hermes UI."
     }
-    $ollamaProbe = Invoke-OllamaCompatProbe -ModelName $configuredModel
-    if (-not $ollamaProbe.choices -or $ollamaProbe.choices.Count -lt 1) {
-        throw "Bundled Ollama OpenAI-compatible probe returned no choices."
+    if ($requiresBundledOllama) {
+        $ollamaProbe = Invoke-OllamaCompatProbe -ModelName $configuredModel
+        if (-not $ollamaProbe.choices -or $ollamaProbe.choices.Count -lt 1) {
+            throw "Bundled Ollama OpenAI-compatible probe returned no choices."
+        }
     }
     $ownerPath = Get-PortOwnerPath -Port 9119
     if ($ownerPath -ine $pythonExe) {
@@ -1547,6 +1909,7 @@ try {
 } finally {
     Stop-PortListeners -Port 9119
     Stop-PortListeners -Port 11434
+    Stop-PortListeners -Port 11435
     if ($null -eq $oldHeadless) {
         Remove-Item Env:HERMESGO_HEADLESS -ErrorAction SilentlyContinue
     } else {
@@ -1573,7 +1936,7 @@ try {
 $packageReadme = @'
 # HermesGo
 
-HermesGo is the Windows green bundle for Hermes Agent. It is also intended to serve as a USB-friendly, one-click install package with a built-in local model runtime.
+HermesGo is the Windows green bundle for Hermes Agent.
 
 ## Download
 
@@ -1587,67 +1950,55 @@ HermesGo is the Windows green bundle for Hermes Agent. It is also intended to se
 - Older release versions remain published on GitHub Releases and are not deleted.
 - Yesterday's archive `__PREVIOUS_RELEASE_PATTERN__` is the older version; it is kept on purpose.
 
-The full package is about 1.6 GB and includes everything needed to run directly:
-
-- Hermes Agent runtime
-- Dashboard
-- Portable Python
-- Portable Ollama runtime
-- Default Ollama 2B model store
-- `HermesGo.exe` with a horse-head icon, a classic beginner launcher, a selectable action box, and a contextual explanation area under the selection
-- Bundled `codex.cmd` compatibility launcher for the release package, not an external Codex CLI dependency
-- `tutorial/` with numbered screenshots and usage notes for new users
-
 ## How to use
 
 1. Download the full zip. It keeps the top-level `HermesGo/` directory.
 2. Extract the whole `HermesGo/` directory. Do not copy only `HermesGo.exe`.
-3. Double-click `HermesGo.exe`. It opens the classic launcher with a selectable action box for beginner start, OpenAI GPT-5.4 mini, Dashboard / Config, and utility actions for model switching, self-check, logs, config folders, and custom launcher actions from `home/launcher-actions.txt`.
-4. If you prefer the direct entry, double-click `HermesGo.bat`.
-5. For a quick self-check, run `Verify-HermesGo.bat`.
-6. To switch the default local model, run `Switch-HermesGoModel.bat`.
-7. Local 2B startup does not trigger ChatGPT / Codex sign-in. Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing.
-8. If you are learning the package, open `tutorial/README.md` first and follow the numbered screenshots.
+3. The top-level contains `HermesGo.exe`, `README.md`, and the `app\` folder.
+4. Open `README.md` beside `HermesGo.exe` if you want the package instructions without entering `app\`.
+5. Double-click `HermesGo.exe`. It opens the classic launcher with a selectable action box for beginner start, OpenAI GPT-5.4 mini, Dashboard / Config, and utility actions for model switching, self-check, logs, config folders, and custom launcher actions from `home\launcher-actions.txt`. The launcher keeps local start as the default; cloud is still available as an explicit choice.
+6. Original HermesGo and the `00-07` suite are both launched from `HermesGo.exe`.
+7. The UI suite checkboxes default to on so the packaged selector matches the green bundle screenshot; clear them only when you want a quieter launch.
+8. Local 2B startup does not trigger ChatGPT / Codex sign-in. Only `Cloud: GPT-5.4 Mini` auto-runs the bundled login flow when Codex auth is missing, and only after you explicitly choose it.
+9. Maintenance assets, docs, screenshots, runtime files, and internal scripts all live under `app\`.
 
 ## Directory map
 
 | Path | Purpose |
 |---|---|
-| `HermesGo.exe` | Classic launcher entrypoint with beginner, cloud, advanced, utility, and custom choices |
-| `HermesGo.bat` | Direct entrypoint for the full runtime |
-| `Start-HermesGo.ps1` | Main launcher that starts runtime, Dashboard, and chat |
-| `Verify-HermesGo.bat` / `Verify-HermesGo.ps1` | Structure and runtime verification |
-| `Switch-HermesGoModel.bat` / `Switch-HermesGoModel.ps1` | Switch the default local model |
-| `codex.cmd` | Bundled Codex-compatible shim used by the release package |
-| `runtime/` | Packaged runtime files |
-| `home/` | Persistent config, sessions, state, and memory |
-| `data/` | Runtime data |
-| `data/ollama/` | Bundled Ollama model store |
-| `data/ollama/models/` | Offline model files and manifests |
-| `tutorial/` | Numbered usage screenshots and notes for new users |
-| `logs/` | Temporary logs |
-| `HermesGo-debug.txt` | Root debug log, refreshed on each launch |
-| `installers/` | Optional installer drop-in directory, not required for runtime |
+| `HermesGo.exe` | The only user-facing launcher entry |
+| `README.md` | Main package readme beside the launcher |
+| `app\docs\README.md` | Internal duplicate of the package readme for in-app browsing |
+| `app\scripts\` | Internal maintenance scripts used by `HermesGo.exe` |
+| `app\tools\codex.cmd` | Bundled Codex-compatible shim used by the package |
+| `app\runtime\` | Packaged runtime files |
+| `app\home\` | Persistent config, sessions, state, and memory |
+| `app\data\` | Runtime data and bundled Ollama model store |
+| `app\tutorial\` | Numbered usage screenshots and notes for new users |
+| `app\ui-suite\` | Packaged docs, screenshots, launcher runtime, and the `01-07` UI candidate app directories |
+| `app\logs\` | Debug, update, and temporary logs |
+| `app\assets\` | Logos and icon assets used by the launcher |
+| `app\installers\` | Optional installer drop-in directory, not required for runtime |
 
 ## How I tested it
 
-I did not keep editing the published output directly. I used an isolated test workspace:
-
 1. Run `create_hermes_go/test/Prepare-HermesGoTestWorkspace.ps1 -Clean`
 2. The script copies `create_hermes_go/output/HermesGo` into `create_hermes_go/test/workspaces/HermesGo-sandbox`
-3. Make changes and launch `HermesGo.exe` / `HermesGo.bat` in the sandbox
+3. Make changes and test `HermesGo.exe` plus the internal scripts in the sandbox
 4. Run `create_hermes_go/test/Verify-HermesGoTestWorkspace.ps1`
 
 What the verification checks:
 
-- The launcher remembers the last selected item, loads custom actions from `home/launcher-actions.txt`, and shows state-aware explanations for each menu item
-- Cloud / GPT-5.4 mini checks Codex login state before launch and opens the browser login page only when credentials are missing
-- Local start and local model switching still work
-- `HermesGo.bat` / `Start-HermesGo.ps1` still start the Dashboard flow
+- The root directory contains only `HermesGo.exe` and `README.md` as files
+- The launcher loads custom actions from `app\home\launcher-actions.txt`; startup stays local-first and cloud remains an explicit choice
+- `HermesGo.exe` exposes a visible `UI 套件共 8 项（00 原版 + 01-07）` section instead of hiding the suite behind a utility entry
+- `HermesGo.exe --ui-suite 00 --ui-suite-no-browser` can start the original HermesGo UI from the exe itself
+- `app\scripts\Start-HermesGoUiSuite.ps1 -List` can enumerate the packaged `00-07` ids
 - The bundled Ollama 2B model store is available
 - The portable Python runtime is still the bundled one
-- Launch logs are written to `HermesGo-debug.txt`
-- Tutorial screenshots live in `tutorial/`
+- Launch logs are written to `app\logs\update\HermesGo-bootstrap.log`
+- Tutorial screenshots live in `app\tutorial\`
+- The package also carries `app\ui-suite\docs\` and the packaged `app\ui-suite\apps\01-07` directories
 - Release packaging excludes local `auth.json` / `auth.lock` credentials from the ship-ready bundle
 
 If you want to keep iterating, do it in the sandbox first and only return to the published package after the sandbox passes.
@@ -1672,9 +2023,9 @@ $installerReadme = @'
 
 $homeConfig = @'
 model:
-  provider: "__DEFAULT_OLLAMA_PROVIDER__"
-  default: "__DEFAULT_OLLAMA_MODEL__"
-  base_url: "__DEFAULT_OLLAMA_BASE_URL__"
+  provider: "ollama"
+  default: "gemma:2b"
+  base_url: "http://127.0.0.1:11434/v1"
 
 terminal:
   backend: "local"
@@ -1683,11 +2034,23 @@ terminal:
   lifetime_seconds: 300
 '@
 
+$launcherActions = @'
+; HermesGo custom launcher actions
+; Format: key|title|description|kind|value
+; kind: preset, script, folder, url
+; Example:
+; custom-qwen|Custom: Qwen 3B|Switch to qwen2.5:3b local model|preset|provider=ollama;model=qwen2.5:3b;baseUrl=http://127.0.0.1:11434/v1
+; custom-work|Custom: Open Work Folder|Open your own work folder|folder|E:\AI\hermes
+
+; UI 套件主入口已经集成到 HermesGo.exe 里。
+; 需要说明时直接打开 app\ui-suite\docs\README.md。
+'@
+
 $codexCmd = @'
 @echo off
 setlocal EnableExtensions
 
-set "ROOT=%~dp0"
+for %%I in ("%~dp0..") do set "ROOT=%%~fI\"
 set "PYTHON_EXE=%ROOT%runtime\python311\python.exe"
 set "RUNTIME_BIN=%ROOT%runtime\bin"
 set "HERMES_HOME=%ROOT%home"
@@ -1703,12 +2066,20 @@ if not exist "%PYTHON_EXE%" (
 )
 
 if /i "%~1"=="login" (
-    "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~2 %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    if /i "%~2"=="--device-auth" (
+        "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    ) else (
+        "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex %~2 %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    )
     exit /b %ERRORLEVEL%
 )
 
 if /i "%~1"=="auth" if /i "%~2"=="login" (
-    "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    if /i "%~3"=="--device-auth" (
+        "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex --device-auth %~4 %~5 %~6 %~7 %~8 %~9
+    ) else (
+        "%PYTHON_EXE%" -m hermes_cli.main auth add openai-codex %~3 %~4 %~5 %~6 %~7 %~8 %~9
+    )
     exit /b %ERRORLEVEL%
 )
 
@@ -1737,7 +2108,8 @@ $builderReadme = @'
 - `create_hermes_go/output/HermesGo` 是最终交付目录，复制整个目录即可离线运行
 - 生成时会带上 `HermesGo.exe` 的应用图标、经典启动器和 `codex.cmd` 兼容入口，并把测试工作区放到独立沙箱里验证
 - 生成时也会把 `tutorial/` 一起带上，方便新手按编号图片学习使用
-- 这条 release 线不依赖外部安装的 Codex CLI；本地 2B 不会触发 ChatGPT / Codex 登录，只有 Cloud 路线在缺少授权时才自动登录
+- 这条 release 线保留经典启动方式：默认 `Beginner: Local Start`，`Cloud: GPT-5.4 Mini` 仍然可手动选择，另有 `Dashboard / Config` 和各类工具动作
+- 更新功能保留在启动器底部，包内配置、日志和 launcher-actions 都写在绿色版目录
 - 当前版本信息来自 `create_hermes_go/release-state.json`
 - 更新下载包名、checksum 和 release tag 时，先改 `Sync-HermesGoReleaseState.ps1` 使用的状态文件，再重新生成
 - 当前发布版本：`__CURRENT_RELEASE_TAG__`
@@ -1768,19 +2140,19 @@ $doc003 = @'
 
 ## 新版本特性
 
-- `HermesGo.exe` 是主入口，保留经典启动器，适合新手直接点选。
-- 本地 2B 启动只走离线模型，不会触发 ChatGPT / Codex 登录。
-- `Cloud: GPT-5.4 Mini` 只有在未登录时才会自动发起 Codex 登录。
+- `HermesGo.exe` 是主入口，启动器默认保持 `Beginner: Local Start`，`Cloud: GPT-5.4 Mini` 仍可手动选择，另有 `Expert: Dashboard / Config` 和各类工具动作。
+- `Cloud: GPT-5.4 Mini` 会在缺少授权时先走浏览器登录流程，再继续启动 Dashboard 和聊天窗口。
 - OpenAI Codex 登录走的是 Hermes 自己内置的浏览器 / 认证流程，不依赖外部安装的 Codex CLI。
 - 绿色包不会携带本地 `auth.json`、`auth.lock` 这类账号凭据文件。
+- 更新功能保留在启动器底部，不再暴露其它启动入口。
 - 原来的版本保留在 GitHub Releases，不删除、不覆盖。
 
 ## 兼容性说明
 
 - 旧版继续可用，适合已经习惯原工作流的用户。
 - 新版新增的是绿色版 / U 盘版 / 一键安装版的便携体验。
-- 如果你只想跑本地大模型，直接用本地 2B 入口即可。
-- 如果你要云端能力，只在 `Cloud: GPT-5.4 Mini` 里登录一次即可。
+- 如果你要云端能力，直接选择 `Cloud: GPT-5.4 Mini`；不选云端时，启动器默认保持本地优先。
+- 更新功能仍然保留在启动器底部。
 
 ## 发布约定
 
@@ -1861,32 +2233,54 @@ $homeConfig = $homeConfig.Replace("__DEFAULT_OLLAMA_MODEL__", $defaultOllamaMode
 $homeConfig = $homeConfig.Replace("__DEFAULT_OLLAMA_BASE_URL__", $defaultOllamaBaseUrl)
 
 Write-Step "Writing portable package files"
-Write-Utf8File -Path (Join-Path $OutputDir "HermesGo.bat") -Content $launcherBat
-Write-Utf8File -Path (Join-Path $OutputDir "Setup-Ollama.bat") -Content $setupOllamaBat
-Write-Utf8File -Path (Join-Path $OutputDir "Start-HermesGo.ps1") -Content $startHermesPs1
-Write-Utf8File -Path (Join-Path $OutputDir "Verify-HermesGo.bat") -Content $verifyBat
-Write-Utf8File -Path (Join-Path $OutputDir "Verify-HermesGo.ps1") -Content $verifyPs1
-Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\Switch-HermesGoModel.ps1") -Destination (Join-Path $OutputDir "Switch-HermesGoModel.ps1") -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\Switch-HermesGoModel.bat") -Destination (Join-Path $OutputDir "Switch-HermesGoModel.bat") -Force
-Write-Utf8File -Path (Join-Path $OutputDir "codex.cmd") -Content $codexCmd
-Write-Utf8File -Path (Join-Path $OutputDir "README.md") -Content $packageReadme
-Write-Utf8File -Path (Join-Path $OutputDir "installers\README.md") -Content $installerReadme
+Write-Utf8File -Path (Join-Path $scriptsDir "HermesGo.bat") -Content $launcherBat
+Write-Utf8File -Path (Join-Path $scriptsDir "Setup-Ollama.bat") -Content $setupOllamaBat
+Write-Utf8File -Path (Join-Path $scriptsDir "Start-HermesGo.ps1") -Content $startHermesPs1
+Write-Utf8File -Path (Join-Path $scriptsDir "Verify-HermesGo.bat") -Content $verifyBat
+Write-Utf8File -Path (Join-Path $scriptsDir "Verify-HermesGo.ps1") -Content $verifyPs1
+Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\Switch-HermesGoModel.ps1") -Destination (Join-Path $scriptsDir "Switch-HermesGoModel.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "HermesGo\Switch-HermesGoModel.bat") -Destination (Join-Path $scriptsDir "Switch-HermesGoModel.bat") -Force
+Copy-Item -LiteralPath (Join-Path $sourceUiSuiteScripts "Start-HermesGoUiSuite.ps1") -Destination (Join-Path $scriptsDir "Start-HermesGoUiSuite.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $sourceUiSuiteScripts "Start-HermesGoUiSuite.bat") -Destination (Join-Path $scriptsDir "Start-HermesGoUiSuite.bat") -Force
+Copy-Item -LiteralPath (Join-Path $sourceUiSuiteScripts "Stop-HermesGoUiSuite.ps1") -Destination (Join-Path $scriptsDir "Stop-HermesGoUiSuite.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $sourceUiSuiteScripts "Stop-HermesGoUiSuite.bat") -Destination (Join-Path $scriptsDir "Stop-HermesGoUiSuite.bat") -Force
+Write-Utf8File -Path (Join-Path $toolsDir "codex.cmd") -Content $codexCmd
+Write-Utf8File -Path (Join-Path $docsOutputDir "README.md") -Content $packageReadme
+Write-Utf8File -Path (Join-Path $installersDir "README.md") -Content $installerReadme
 if (Test-Path -LiteralPath (Join-Path $builderRoot "tutorial")) {
-    Copy-Tree -Source (Join-Path $builderRoot "tutorial") -Destination (Join-Path $OutputDir "tutorial")
+    Copy-Tree -Source (Join-Path $builderRoot "tutorial") -Destination (Join-Path $appDir "tutorial")
 }
-Reset-OutputHomeState -HomeDir (Join-Path $OutputDir "home")
-Write-Utf8File -Path (Join-Path $OutputDir "home\portable-defaults.txt") -Content @"
+if (Test-Path -LiteralPath $sourceUiSuite) {
+    Copy-Tree -Source $sourceUiSuite -Destination (Join-Path $appDir "ui-suite") -ExcludeDirectories @("01-hermes-agent-desktop")
+}
+Reset-OutputHomeState -HomeDir (Join-Path $appDir "home")
+Write-Utf8File -Path (Join-Path $appDir "home\portable-defaults.txt") -Content @"
 ; Portable fallback defaults for HermesGo
 DEFAULT_OLLAMA_PROVIDER=$defaultOllamaProvider
 DEFAULT_OLLAMA_MODEL=$defaultOllamaModel
 DEFAULT_OLLAMA_BASE_URL=$defaultOllamaBaseUrl
 "@
-Write-Utf8File -Path (Join-Path $OutputDir "home\config.yaml") -Content $homeConfig
-Write-Utf8File -Path (Join-Path $OutputDir "home\.env") -Content ""
+Write-Utf8File -Path (Join-Path $appDir "home\config.yaml") -Content $homeConfig
+Write-Utf8File -Path (Join-Path $appDir "home\.env") -Content ""
+Write-Utf8File -Path (Join-Path $appDir "home\launcher-actions.txt") -Content $launcherActions
 Write-Step "Creating HermesGo application icon"
-$iconPath = Join-Path $OutputDir "HermesGo.ico"
-New-HermesGoIcon -OutputPath $iconPath -PngOutputPath (Join-Path $OutputDir "HermesGo-logo.png")
+New-Item -ItemType Directory -Path $assetsDir, $assetsIconsDir -Force | Out-Null
+$iconPath = Join-Path $assetsIconsDir "HermesGo.ico"
+New-HermesGoIcon -OutputPath $iconPath -PngOutputPath (Join-Path $assetsDir "HermesGo-logo.png")
 Build-HermesGoExe -SourcePath (Join-Path $builderRoot "HermesGoBootstrap.cs") -OutputPath (Join-Path $OutputDir "HermesGo.exe") -IconPath $iconPath
+Get-ChildItem -LiteralPath $OutputDir -Force | Where-Object {
+    -not (
+        ($_.PSIsContainer -and $_.Name -eq "app") -or
+        (-not $_.PSIsContainer -and ($_.Name -eq "HermesGo.exe" -or $_.Name -eq "README.md"))
+    )
+} | ForEach-Object {
+    if ($_.PSIsContainer) {
+        Remove-TreeRobust -Path $_.FullName
+    } else {
+        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+Write-Utf8File -Path (Join-Path $OutputDir "README.md") -Content $packageReadme
 Write-Utf8File -Path (Join-Path $builderRoot "README.md") -Content $builderReadme
 Write-Utf8File -Path (Join-Path $docsDir "001-当前状态与标准边界.md") -Content $doc001
 Write-Utf8File -Path (Join-Path $docsDir "002-便携构建步骤与后续工作.md") -Content $doc002

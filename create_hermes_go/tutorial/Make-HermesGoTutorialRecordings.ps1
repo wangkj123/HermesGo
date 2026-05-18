@@ -15,21 +15,39 @@ function Stop-HermesGoProcesses {
     Get-Process HermesGo -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
-function Set-LauncherSelection {
-    param([string]$Key)
+function Set-LauncherConfig {
+    param(
+        [string]$Provider,
+        [string]$Model,
+        [string]$BaseUrl
+    )
+
     New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
-    Set-Content -LiteralPath (Join-Path $homeDir 'launcher-selected.txt') -Value $Key -Encoding utf8
+    @"
+model:
+  provider: "$Provider"
+  default: "$Model"
+  base_url: "$BaseUrl"
+
+terminal:
+  backend: "local"
+  cwd: "."
+  timeout: 180
+  lifetime_seconds: 300
+"@ | Set-Content -LiteralPath (Join-Path $homeDir 'config.yaml') -Encoding utf8
 }
 
 function Record-LauncherState {
     param(
-        [string]$Key,
+        [string]$Provider,
+        [string]$Model,
+        [string]$BaseUrl,
         [string]$OutputName,
         [double]$Duration = 4.0
     )
 
     Stop-HermesGoProcesses
-    Set-LauncherSelection -Key $Key
+    Set-LauncherConfig -Provider $Provider -Model $Model -BaseUrl $BaseUrl
     $process = Start-Process -FilePath $launcherExe -WorkingDirectory $PackageRoot -PassThru
     try {
         Start-Sleep -Seconds 2
@@ -59,16 +77,9 @@ function Record-CodexLogin {
 
 New-Item -ItemType Directory -Force -Path $recordingsDir | Out-Null
 
-Record-LauncherState -Key 'beginner' -OutputName '01-启动器主界面.mp4'
-Record-LauncherState -Key 'cloud' -OutputName '02-Cloud-GPT-5.4-mini.mp4'
+Record-LauncherState -Provider 'ollama' -Model 'gemma:2b' -BaseUrl 'http://127.0.0.1:11434/v1' -OutputName '01-Local-Start.mp4'
+Record-LauncherState -Provider 'openai-codex' -Model 'gpt-5.4-mini' -BaseUrl 'https://chatgpt.com/backend-api/codex' -OutputName '02-Cloud-GPT-5.4-mini.mp4'
 Record-CodexLogin -OutputName '02-Cloud-GPT-5.4-mini-login.mp4'
-Record-LauncherState -Key 'expert' -OutputName '03-Expert-Dashboard-Only.mp4'
-Record-LauncherState -Key 'switch-model' -OutputName '04-本地模型切换.mp4'
-Record-LauncherState -Key 'verify' -OutputName '05-自检和日志.mp4'
-Record-LauncherState -Key 'codex-login' -OutputName '06-Codex-登录.mp4'
-Record-LauncherState -Key 'open-home' -OutputName '07-打开-home-目录.mp4'
-Record-LauncherState -Key 'open-logs' -OutputName '08-打开-logs-目录.mp4'
-Record-LauncherState -Key 'open-custom-actions' -OutputName '09-自定义动作.mp4'
 
 Stop-HermesGoProcesses
 Write-Host "Recordings created in $recordingsDir"

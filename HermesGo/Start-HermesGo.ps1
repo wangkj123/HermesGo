@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$NoOpenBrowser,
     [switch]$NoOpenChat,
+    [switch]$NoOpenDesktop,
     [int]$DashboardTimeoutSec = 45
 )
 
@@ -23,6 +24,30 @@ function Resolve-PortablePath {
     return $trimmed
 }
 
+function Remove-WindowsReservedArtifacts {
+    param([string]$Directory)
+
+    if ([string]::IsNullOrWhiteSpace($Directory) -or -not (Test-Path -LiteralPath $Directory)) {
+        return
+    }
+
+    $reserved = @('nul', 'con', 'prn', 'aux') + (1..9 | ForEach-Object { "com$_"; "lpt$_" })
+    foreach ($name in $reserved) {
+        $candidate = Join-Path $Directory $name
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction SilentlyContinue)) {
+            continue
+        }
+
+        try {
+            $full = (Get-Item -LiteralPath $candidate -ErrorAction Stop).FullName
+            Remove-Item -LiteralPath "\\?\$full" -Force -ErrorAction Stop
+            Write-Host "[HermesGo] Removed Windows reserved artifact: $full"
+        } catch {
+            Write-Host "[HermesGo] WARNING: could not remove reserved artifact $candidate : $($_.Exception.Message)"
+        }
+    }
+}
+
 $root = Resolve-PortablePath -Path $PSScriptRoot
 # If the script is in app/scripts/, resolve root to app/ (parent of scripts)
 if (-not (Test-Path -LiteralPath (Join-Path $root "runtime\python311\python.exe"))) {
@@ -36,6 +61,13 @@ if (-not (Test-Path -LiteralPath (Join-Path $root "runtime\python311\python.exe"
         $root = Join-Path $root "app"
     }
 }
+
+$packageRoot = Split-Path -Parent $root
+Remove-WindowsReservedArtifacts -Directory $root
+if ($packageRoot -and $packageRoot -ne $root) {
+    Remove-WindowsReservedArtifacts -Directory $packageRoot
+}
+
 $pythonExe = Join-Path $root "runtime\python311\python.exe"
 $runtimeDir = Join-Path $root "runtime\hermes-agent"
 $runtimeBinDir = Join-Path $root "runtime\bin"
@@ -49,6 +81,8 @@ $dashboardUrl = "http://127.0.0.1:9119/"
 $dashboardBrowserUrl = "http://127.0.0.1:9119/env?quick=1"
 $webuiUrl = "http://127.0.0.1:8787/"
 $webuiDir = Join-Path $root "runtime\hermes-webui"
+$desktopDir = Join-Path $root "runtime\hermes-desktop"
+$desktopExe = Join-Path $desktopDir "Hermes.exe"
 $headless = $env:HERMESGO_HEADLESS -eq "1"
 $preserveDebugLog = $env:HERMESGO_APPEND_DEBUG_LOG -eq "1"
 $proxyBypassDefaults = @(
@@ -571,6 +605,33 @@ function Start-WebUIProcess {
     Write-LauncherLine "WebUI probe timed out after 30s (PID $($process.Id) may still be starting)"
 }
 
+function Start-HermesDesktopProcess {
+    if (-not (Test-Path -LiteralPath $desktopExe)) {
+        Write-LauncherLine "Hermes Desktop skipped (not bundled): $desktopExe"
+        return
+    }
+
+    $running = Get-Process -Name "Hermes" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and ($_.Path -eq $desktopExe) } |
+        Select-Object -First 1
+    if ($running) {
+        Write-LauncherLine "Hermes Desktop already running: PID $($running.Id)"
+        return
+    }
+
+    $desktopEnv = @{
+        HERMES_HOME = $homeDir
+        HERMES_DESKTOP_HERMES_ROOT = $runtimeDir
+        HERMES_DESKTOP_PYTHON = $pythonExe
+    }
+
+    $process = Start-Process -FilePath $desktopExe `
+        -WorkingDirectory $desktopDir `
+        -PassThru `
+        -Environment $desktopEnv
+    Write-LauncherLine "Hermes Desktop started: PID $($process.Id)"
+}
+
 function Start-ChatWindow {
     $existing = Get-Process -Name "cmd" -ErrorAction SilentlyContinue |
         Where-Object { $_.MainWindowTitle -like "*HermesGo Chat*" } |
@@ -589,7 +650,7 @@ function Start-ChatWindow {
         '&&set no_proxy=' + $env:no_proxy +
         '&&set PYTHONUTF8=1' +
         '&&set PYTHONIOENCODING=utf-8' +
-        '&&chcp 65001>nul' +
+        '&&chcp 65001>"%SystemRoot%\System32\NUL"' +
         '&&title HermesGo Chat' +
         '&&"' + $pythonExe + '" -m hermes_cli.main'
 
@@ -675,6 +736,9 @@ try {
     Start-WebUIProcess
 
     if (-not $headless) {
+        if (-not $NoOpenDesktop) {
+            Start-HermesDesktopProcess
+        }
         if (-not $NoOpenBrowser) {
             Open-DashboardBrowser -Url $webuiUrl
             Start-Sleep -Seconds 1
