@@ -53,27 +53,35 @@ def main() -> int:
         return 3
     asset = artifacts[0]
 
-    tag = "v0.14.0-green-3ui-slim"
-    release_name = "HermesGo v0.14 green 3-UI slim"
-    body = """## HermesGo v0.14 green portable (three UIs)
+    tag = "v0.14.1-green-3ui-slim"
+    release_name = "HermesGo v0.14.1 green 3-UI slim"
+    body = """## HermesGo v0.14.1 green portable (three UIs)
 
-- **HermesGo.exe** — same as `HermesGo.bat`; optional `--menu`; auto-update from this repo
+### Fixes in this build
+- Codex provider test: no bogus `/v1/models` probe on `codex_responses` (fixes Dashboard 502)
+- First-run `auth.json` import from `%USERPROFILE%\\.hermes` when portable home is empty
+- Portable self-test scripts: `app/scripts/smoke_portable_connect.py`, `run_portable_selftest.ps1`
+- Cursor rules: `lessons-learned-auto-update` + `hermesgo-packaging-selftest` pitfall registry
+
+### UIs
+- **HermesGo.exe** / **HermesGo.bat** — Dashboard + WebUI; optional `--menu`; auto-update from this repo
 - **Dashboard** — http://127.0.0.1:9119/env?quick=1
-- **WebUI** — http://127.0.0.1:8787 (Kanban backend included)
-- **Desktop** — portable Electron (`HermesDesktop.bat`)
+- **WebUI** — http://127.0.0.1:8787 (Kanban included)
+- **Desktop** — `HermesDesktop.bat` (portable Electron)
 
 ### Package layout
-- Root: `HermesGo.exe`, `README.txt` (EN/CN), `HermesGo.bat`, `HermesWebUI.bat`, `HermesDesktop.bat`
+- Root: `HermesGo.exe`, `README.txt` (EN/CN), three `.bat` launchers
 - Under `app/`: `scripts/`, `runtime/`, `home/`, `assets/`, …
 
 ### Not included (~220 MB slim)
-- Bundled Ollama runtime and preloaded model blobs (use cloud keys or install Ollama separately)
+- Bundled Ollama runtime and preloaded model blobs
 
 ### Build from source
 ```powershell
 powershell -File HermesGo/scripts/Compile-HermesGoBootstrap.ps1
 powershell -File HermesGo/scripts/build_hermes_desktop_portable.ps1
 py -3 HermesGo/build_zip_slim.py
+py -3 scripts/publish_github_release.py
 ```
 """
 
