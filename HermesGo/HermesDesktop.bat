@@ -2,22 +2,12 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-set "ROOT=%~dp0app"
-if not exist "%ROOT%\runtime\python311\python.exe" set "ROOT=%~dp0"
+set "SCRIPT=%~dp0app\scripts\Start-HermesGo.ps1"
+if not exist "%SCRIPT%" set "SCRIPT=%~dp0Start-HermesGo.ps1"
 
-set "DESKTOP_DIR=%ROOT%\runtime\hermes-desktop"
-set "DESKTOP_EXE=%DESKTOP_DIR%\Hermes.exe"
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS%" set "PS=powershell.exe"
 
-if not exist "%DESKTOP_EXE%" (
-    echo [ERROR] Hermes Desktop not found: %DESKTOP_EXE%
-    pause
-    exit /b 1
-)
-
-set "HERMES_HOME=%ROOT%\home"
-set "HERMES_DESKTOP_HERMES_ROOT=%ROOT%\runtime\hermes-agent"
-set "HERMES_DESKTOP_PYTHON=%ROOT%\runtime\python311\python.exe"
-
-echo Starting Hermes Desktop (portable) ...
-start "" /D "%DESKTOP_DIR%" "%DESKTOP_EXE%"
-exit /b 0
+echo Starting Hermes Desktop (portable init + probe) ...
+"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -DesktopOnly
+exit /b %ERRORLEVEL%

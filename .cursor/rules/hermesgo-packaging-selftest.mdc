@@ -53,6 +53,16 @@ alwaysApply: false
 - **错误做法**：不带 token 调 `/api/*`
 - **正确做法**：根路径 `/` 或 `/health`（若存在）探活；API 用 session token；脚本见 `HermesGo/scripts/smoke_portable_connect.py`
 
+### 2026-05-18 — Codex 已登录但 UI 仍提示未配置
+- **现象**：`auth.json` 有 openai-codex，但 Dashboard/WebUI 仍显示需配置
+- **错误做法**：只查 `config.yaml` 是否有 provider，忽略 OAuth 已登录
+- **正确做法**：`GET /api/setup/status` 或 WebUI `/api/onboarding/status`；Codex 登录 + `config.yaml` 中 `provider: openai-codex` 才为 `ready`
+
+### 2026-05-18 — Desktop 启动顺序
+- **现象**：只双击 `Hermes.exe` 或旧 `HermesDesktop.bat`（`start` 无初始化）进不去
+- **错误做法**：Desktop 前先起 9119/8787；或 `HermesDesktop.bat` 不跑 `Ensure-PortableAuthFromProfile`
+- **正确做法**：`HermesDesktop.bat` → `Start-HermesGo.ps1 -DesktopOnly`（便携 PATH/auth/config → 只起 Desktop → 探测 9120+）；`HermesGo.bat` 仍可同时起三件套
+
 ### 2026-05-18 — Desktop 启动失败 `--tui`
 - **现象**：Desktop 窗口卡在启动/进不去；`app/home/logs/desktop.log` 有 `unrecognized arguments: --tui`
 - **错误做法**：只更新 Electron `Hermes.exe`，不更新捆绑的 `runtime/hermes-agent` CLI

@@ -2,7 +2,9 @@
     [switch]$NoOpenBrowser,
     [switch]$NoOpenChat,
     [switch]$NoOpenDesktop,
-    [int]$DashboardTimeoutSec = 45
+    [switch]$DesktopOnly,
+    [int]$DashboardTimeoutSec = 45,
+    [int]$DesktopTimeoutSec = 60
 )
 
 Set-StrictMode -Version Latest
@@ -791,6 +793,48 @@ function Start-HermesDesktopProcess {
         -Environment $desktopEnv `
         -WindowStyle "Normal"
     Write-LauncherLine "Hermes Desktop started: PID $($process.Id)"
+    return $process
+}
+
+function Wait-HermesDesktopReady {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$TimeoutSec = 60
+    )
+
+    $logPath = Join-Path $homeDir "logs\desktop.log"
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if ($Process.HasExited) {
+            $tail = ""
+            if (Test-Path -LiteralPath $logPath) {
+                $tail = (Get-Content -LiteralPath $logPath -Tail 12 -ErrorAction SilentlyContinue) -join "`n"
+            }
+            throw "Hermes Desktop exited before ready (code $($Process.ExitCode)). Log tail:`n$tail"
+        }
+
+        if (Test-Path -LiteralPath $logPath) {
+            $logText = Get-Content -LiteralPath $logPath -Raw -ErrorAction SilentlyContinue
+            if ($logText -match "unrecognized arguments: --tui") {
+                throw "Hermes Desktop backend failed: dashboard CLI does not support --tui (update hermes-agent)"
+            }
+            if ($logText -match "Desktop boot failed") {
+                throw "Hermes Desktop boot failed — see $logPath"
+            }
+            if ($logText -match "backend is ready") {
+                for ($port = 9120; $port -le 9199; $port++) {
+                    if (Test-ListeningPort -Port $port) {
+                        Write-LauncherLine "Hermes Desktop probe succeeded on port $port"
+                        return $port
+                    }
+                }
+            }
+        }
+
+        Start-Sleep -Seconds 1
+    }
+
+    throw "Hermes Desktop probe timed out after ${TimeoutSec}s (see $logPath)"
 }
 
 function Start-ChatWindow {
@@ -891,21 +935,31 @@ try {
     Write-LauncherLine "Portable target: standard Hermes runtime with portable Python only (no system Python on PATH)."
     Apply-CloudPreferredRouteIfAvailable
 
-    Ensure-LocalOllamaReady
-    Start-DashboardProcess
-    Start-WebUIProcess
+    if ($DesktopOnly) {
+        Write-LauncherLine "Desktop-only mode: skip browser Dashboard (9119) and WebUI (8787)."
+        $desktopProc = Start-HermesDesktopProcess
+        if ($desktopProc) {
+            Wait-HermesDesktopReady -Process $desktopProc -TimeoutSec $DesktopTimeoutSec | Out-Null
+        } else {
+            throw "Hermes Desktop executable not found at $desktopExe"
+        }
+    } else {
+        Ensure-LocalOllamaReady
+        Start-DashboardProcess
+        Start-WebUIProcess
 
-    if (-not $headless) {
-        if (-not $NoOpenDesktop) {
-            Start-HermesDesktopProcess
-        }
-        if (-not $NoOpenBrowser) {
-            Open-DashboardBrowser -Url $webuiUrl
-            Start-Sleep -Seconds 1
-            Open-DashboardBrowser -Url $dashboardBrowserUrl
-        }
-        if (-not $NoOpenChat) {
-            Start-ChatWindow
+        if (-not $headless) {
+            if (-not $NoOpenDesktop) {
+                $null = Start-HermesDesktopProcess
+            }
+            if (-not $NoOpenBrowser) {
+                Open-DashboardBrowser -Url $webuiUrl
+                Start-Sleep -Seconds 1
+                Open-DashboardBrowser -Url $dashboardBrowserUrl
+            }
+            if (-not $NoOpenChat) {
+                Start-ChatWindow
+            }
         }
     }
 
