@@ -1,0 +1,10 @@
+model:
+  provider: "deepseek"
+  default: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com/v1"
+
+terminal:
+  backend: "local"
+  cwd: "."
+  timeout: 180
+  lifetime_seconds: 300

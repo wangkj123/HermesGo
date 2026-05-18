@@ -124,8 +124,9 @@ function Ensure-PortableHomeConfig {
 
     $templates = @(
         (Join-Path $AppRoot "home\config.yaml.slim-default"),
-        (Join-Path $PSScriptRoot "..\home\config.yaml.slim-default"),
-        (Join-Path $PSScriptRoot "..\..\home\config.yaml.slim-default")
+        (Join-Path $AppRoot "packaging\config.yaml.slim-default"),
+        (Join-Path $PSScriptRoot "..\packaging\config.yaml.slim-default"),
+        (Join-Path $PSScriptRoot "..\..\packaging\config.yaml.slim-default")
     )
 
     foreach ($template in $templates) {
