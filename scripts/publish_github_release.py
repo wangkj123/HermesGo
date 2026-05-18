@@ -53,15 +53,16 @@ def main() -> int:
         return 3
     asset = artifacts[0]
 
-    tag = "v0.14.1-green-3ui-slim"
-    release_name = "HermesGo v0.14.1 green 3-UI slim"
-    body = """## HermesGo v0.14.1 green portable (three UIs)
+    tag = "v0.14.2-green-3ui-slim"
+    release_name = "HermesGo v0.14.2 green 3-UI slim"
+    body = """## HermesGo v0.14.2 green portable (three UIs)
 
 ### Fixes in this build
-- Codex provider test: no bogus `/v1/models` probe on `codex_responses` (fixes Dashboard 502)
+- **Hermes Desktop**: bundled CLI accepts `dashboard --tui` (fixes “cannot enter” / boot loop)
+- `HermesDesktop.bat`: `start /D runtime\\hermes-desktop` for correct Electron cwd
+- Codex provider test: no bogus `/v1/models` probe on `codex_responses`
 - First-run `auth.json` import from `%USERPROFILE%\\.hermes` when portable home is empty
-- Portable self-test scripts: `app/scripts/smoke_portable_connect.py`, `run_portable_selftest.ps1`
-- Cursor rules: `lessons-learned-auto-update` + `hermesgo-packaging-selftest` pitfall registry
+- Self-test: `smoke_portable_connect.py`, `smoke_portable_desktop.py`, `run_portable_selftest.ps1`
 
 ### UIs
 - **HermesGo.exe** / **HermesGo.bat** — Dashboard + WebUI; optional `--menu`; auto-update from this repo
