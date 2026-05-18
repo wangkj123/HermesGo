@@ -2,30 +2,26 @@
 setlocal
 cd /d "%~dp0"
 
-:: Try development layout first (runtime/python311/...)
-set "PYTHON=%CD%\runtime\python311\python.exe"
-set "WEBUI=%CD%\runtime\hermes-webui"
+set "ROOT=%~dp0app"
+if not exist "%ROOT%\runtime\python311\python.exe" set "ROOT=%~dp0"
 
-:: If not found, try deployment layout (app/runtime/python311/...)
-if not exist "%PYTHON%" (
-    set "PYTHON=%CD%\app\runtime\python311\python.exe"
-    set "WEBUI=%CD%\app\runtime\hermes-webui"
-)
+set "PYTHON=%ROOT%\runtime\python311\python.exe"
+set "WEBUI=%ROOT%\runtime\hermes-webui"
 
 if not exist "%PYTHON%" (
-    echo [ERROR] Python not found
-    echo   Tried: %CD%\runtime\python311\python.exe
-    echo   Tried: %CD%\app\runtime\python311\python.exe
+    echo [ERROR] Python not found under package app\runtime\python311
     pause
     exit /b 1
 )
 if not exist "%WEBUI%\run.py" (
-    echo [ERROR] WebUI launcher not found: %WEBUI%\run.py
+    echo [ERROR] WebUI not found: %WEBUI%\run.py
     pause
     exit /b 1
 )
+set "PATH=%ROOT%\runtime\bin;%ROOT%\runtime\python311;%ROOT%\runtime\python311\Scripts;%ROOT%;%SystemRoot%\System32"
+set "HERMES_HOME=%ROOT%\home"
 echo Starting Hermes WebUI on http://127.0.0.1:8787 ...
 start "Hermes WebUI" /MIN "%PYTHON%" "%WEBUI%\run.py"
-timeout /t 3 /nobreak >"%SystemRoot%\System32\NUL"
+timeout /t 3 /nobreak >nul
 start http://127.0.0.1:8787
 exit /b 0

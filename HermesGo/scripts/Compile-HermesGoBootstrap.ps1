@@ -19,8 +19,13 @@ if (-not (Test-Path -LiteralPath $iconScript)) {
     throw "Missing icon generator: $iconScript"
 }
 
+$psExe = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+if (-not (Test-Path -LiteralPath $psExe)) {
+    $psExe = "powershell.exe"
+}
+
 Write-Host "[Compile-HermesGoBootstrap] generating icon assets"
-& powershell -NoProfile -ExecutionPolicy Bypass -File $iconScript
+& $psExe -NoProfile -ExecutionPolicy Bypass -File $iconScript
 if ($LASTEXITCODE -ne 0) {
     throw "New-HermesGoIcon.ps1 failed: $LASTEXITCODE"
 }
@@ -93,7 +98,23 @@ if ($env:HERMESGO_SKIP_TEST_SYNC -match '^(?i)(1|true|yes)$') {
     $syncPy = Join-Path (Split-Path -Parent $PSScriptRoot) "packaging_sync.py"
     if (Test-Path -LiteralPath $syncPy) {
         Write-Host "[Compile-HermesGoBootstrap] syncing test package from latest dist zip"
-        & py -3 $syncPy
+        $pyLauncher = $null
+        foreach ($candidate in @(
+                (Join-Path $devAssetsDir "..\runtime\python311\python.exe"),
+                (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+                "py.exe",
+                "python.exe"
+            )) {
+            $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($candidate)
+            if (Test-Path -LiteralPath $resolved) {
+                $pyLauncher = $resolved
+                break
+            }
+        }
+        if (-not $pyLauncher) {
+            throw "Python not found for packaging_sync.py"
+        }
+        & $pyLauncher $syncPy
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Test package sync failed (exit $LASTEXITCODE). Run build_zip_slim.py after a full zip build."
         }

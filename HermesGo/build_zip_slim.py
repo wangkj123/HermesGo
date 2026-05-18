@@ -206,6 +206,10 @@ def main() -> None:
             included_size += s
 
         # Create clean runtime state dirs (green package, no local history/secrets).
+        slim_config_template = os.path.join(SCRIPT_DIR, "home", "config.yaml.slim-default")
+        if os.path.isfile(slim_config_template):
+            zf.write(slim_config_template, "HermesGo/app/home/config.yaml.slim-default")
+
         for d in (
             "HermesGo/app/home/",
             "HermesGo/app/logs/",

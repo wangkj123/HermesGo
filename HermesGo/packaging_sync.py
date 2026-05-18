@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import zipfile
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 from packaging_safe import assert_zip_has_no_reserved_entries
 

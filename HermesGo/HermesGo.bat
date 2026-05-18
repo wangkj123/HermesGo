@@ -1,8 +1,10 @@
-﻿@echo off
+@echo off
 setlocal EnableExtensions
 
 set "SCRIPT=%~dp0app\scripts\Start-HermesGo.ps1"
 if not exist "%SCRIPT%" set "SCRIPT=%~dp0Start-HermesGo.ps1"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS%" set "PS=powershell.exe"
+"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
 exit /b %ERRORLEVEL%

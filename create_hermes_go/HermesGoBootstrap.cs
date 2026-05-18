@@ -3768,12 +3768,38 @@ internal sealed class HermesBootstrap
         }
     }
 
+    private static string ResolveWindowsPowerShellExe()
+    {
+        var windir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (string.IsNullOrWhiteSpace(windir))
+        {
+            windir = Environment.GetEnvironmentVariable("SystemRoot") ?? string.Empty;
+        }
+
+        var candidates = new[]
+        {
+            Path.Combine(windir, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+            Path.Combine(windir, "Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe"),
+            "powershell.exe",
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return "powershell.exe";
+    }
+
     private void LaunchPackage(string[] args)
     {
         var script = ResolveScriptPath("Start-HermesGo.ps1");
         var batch = ResolveScriptPath("HermesGo.bat");
         var useScript = File.Exists(script);
-        var fileName = useScript ? "powershell.exe" : "cmd.exe";
+        var fileName = useScript ? ResolveWindowsPowerShellExe() : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
         var arguments = useScript
             ? BuildPowerShellArguments(script, args)
             : BuildBatchArguments(batch, args);

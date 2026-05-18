@@ -48,19 +48,152 @@ function Remove-WindowsReservedArtifacts {
     }
 }
 
-$root = Resolve-PortablePath -Path $PSScriptRoot
-# If the script is in app/scripts/, resolve root to app/ (parent of scripts)
-if (-not (Test-Path -LiteralPath (Join-Path $root "runtime\python311\python.exe"))) {
-    # Parent directory (dev layout: scripts/ or nested copy next to runtime/)
-    $parentRoot = Resolve-PortablePath -Path (Join-Path $PSScriptRoot "..")
-    if (Test-Path -LiteralPath (Join-Path $parentRoot "runtime\python311\python.exe")) {
-        $root = $parentRoot
+function Resolve-HermesAppRoot {
+    param([string]$ScriptRoot)
+
+    $scriptRoot = Resolve-PortablePath -Path $ScriptRoot
+    $candidates = @(
+        $scriptRoot,
+        (Resolve-PortablePath -Path (Join-Path $scriptRoot "..")),
+        (Resolve-PortablePath -Path (Join-Path $scriptRoot "..\.."))
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath (Join-Path $candidate "runtime\python311\python.exe")) {
+            return $candidate
+        }
     }
-    # ZIP layout: Start-HermesGo.ps1 at HermesGo/ root, runtimes under HermesGo/app/
-    elseif (Test-Path -LiteralPath (Join-Path $root "app\runtime\python311\python.exe")) {
-        $root = Join-Path $root "app"
+
+    $packageRoot = Resolve-PortablePath -Path (Join-Path $scriptRoot "..")
+    $appRoot = Join-Path $packageRoot "app"
+    if (Test-Path -LiteralPath (Join-Path $appRoot "runtime\python311\python.exe")) {
+        return $appRoot
+    }
+
+    throw "Portable Python not found under $ScriptRoot (expected app\runtime\python311\python.exe)."
+}
+
+function Get-PortablePathList {
+    param([string]$AppRoot)
+
+    $pythonRoot = Join-Path $AppRoot "runtime\python311"
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @(
+            (Join-Path $AppRoot "runtime\bin"),
+            $pythonRoot,
+            (Join-Path $pythonRoot "Scripts"),
+            $AppRoot
+        )) {
+        if (-not [string]::IsNullOrWhiteSpace($entry) -and (Test-Path -LiteralPath $entry)) {
+            if (-not $parts.Contains($entry)) {
+                [void]$parts.Add($entry)
+            }
+        }
+    }
+
+  # Windows needs System32 only to host cmd/powershell; never prepend user/system Python.
+    $system32 = Join-Path $env:WINDIR "System32"
+    if ((Test-Path -LiteralPath $system32) -and -not $parts.Contains($system32)) {
+        [void]$parts.Add($system32)
+    }
+
+    return [string]::Join(";", $parts.ToArray())
+}
+
+function Set-PortableProcessEnvironment {
+    param([string]$AppRoot)
+
+    Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+
+    $env:PATH = Get-PortablePathList -AppRoot $AppRoot
+    $env:HERMES_HOME = Join-Path $AppRoot "home"
+    $env:OLLAMA_MODELS = Join-Path $AppRoot "data\ollama\models"
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONIOENCODING = "utf-8"
+}
+
+function Ensure-PortableHomeConfig {
+    param([string]$AppRoot)
+
+    $configPath = Join-Path $AppRoot "home\config.yaml"
+    if (Test-Path -LiteralPath $configPath) {
+        return
+    }
+
+    $templates = @(
+        (Join-Path $AppRoot "home\config.yaml.slim-default"),
+        (Join-Path $PSScriptRoot "..\home\config.yaml.slim-default"),
+        (Join-Path $PSScriptRoot "..\..\home\config.yaml.slim-default")
+    )
+
+    foreach ($template in $templates) {
+        $resolved = Resolve-PortablePath -Path $template
+        if (Test-Path -LiteralPath $resolved) {
+            Copy-Item -LiteralPath $resolved -Destination $configPath -Force
+            Write-LauncherLine "Created default config from template: $resolved"
+            return
+        }
+    }
+
+    $defaultConfig = @"
+model:
+  provider: "deepseek"
+  default: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com/v1"
+
+terminal:
+  backend: "local"
+  cwd: "."
+  timeout: 180
+  lifetime_seconds: 300
+"@
+    Set-Content -LiteralPath $configPath -Value $defaultConfig -Encoding utf8
+    Write-LauncherLine "Created built-in slim default config: $configPath"
+}
+
+function Start-ProcessWithEnvironment {
+    param(
+        [string]$FilePath,
+        [string]$WorkingDirectory = "",
+        [hashtable]$Environment = @{},
+        [string[]]$ArgumentList = @(),
+        [string]$WindowStyle = "Normal"
+    )
+
+    $saved = @{}
+    foreach ($key in $Environment.Keys) {
+        $saved[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+        Set-Item -Path ("Env:" + $key) -Value $Environment[$key]
+    }
+
+    try {
+        $psi = @{
+            FilePath     = $FilePath
+            PassThru     = $true
+            WindowStyle  = $WindowStyle
+        }
+        if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+            $psi.WorkingDirectory = $WorkingDirectory
+        }
+        if ($ArgumentList -and $ArgumentList.Count -gt 0) {
+            $psi.ArgumentList = $ArgumentList
+        }
+        return Start-Process @psi
+    }
+    finally {
+        foreach ($key in $Environment.Keys) {
+            if ($null -eq $saved[$key] -or $saved[$key].Length -eq 0) {
+                Remove-Item -Path ("Env:" + $key) -ErrorAction SilentlyContinue
+            } else {
+                Set-Item -Path ("Env:" + $key) -Value $saved[$key]
+            }
+        }
     }
 }
+
+$root = Resolve-HermesAppRoot -ScriptRoot $PSScriptRoot
 
 $packageRoot = Split-Path -Parent $root
 Remove-WindowsReservedArtifacts -Directory $root
@@ -443,7 +576,7 @@ function Ensure-LocalOllamaReady {
 
     $ollamaExe = Join-Path $root "runtime\ollama\ollama.exe"
     if (-not (Test-Path -LiteralPath $ollamaExe)) {
-        Write-LauncherLine "Local Ollama not listening and bundled runtime missing: $ollamaExe"
+        Write-LauncherLine "Slim package: bundled Ollama not included; skipping local Ollama ($ollamaExe)."
         return
     }
 
@@ -625,10 +758,11 @@ function Start-HermesDesktopProcess {
         HERMES_DESKTOP_PYTHON = $pythonExe
     }
 
-    $process = Start-Process -FilePath $desktopExe `
+    $process = Start-ProcessWithEnvironment `
+        -FilePath $desktopExe `
         -WorkingDirectory $desktopDir `
-        -PassThru `
-        -Environment $desktopEnv
+        -Environment $desktopEnv `
+        -WindowStyle "Normal"
     Write-LauncherLine "Hermes Desktop started: PID $($process.Id)"
 }
 
@@ -641,16 +775,18 @@ function Start-ChatWindow {
         return
     }
 
+    $portablePath = Get-PortablePathList -AppRoot $root
     $command = 'set PYTHONHOME=' +
         '&&set PYTHONPATH=' +
-        '&&set PATH=' + $root + ';' + $runtimeBinDir + ';%PATH%' +
+        '&&set VIRTUAL_ENV=' +
+        '&&set PATH=' + $portablePath +
         '&&set HERMES_HOME=' + $homeDir +
         '&&set OLLAMA_MODELS=' + $ollamaModelsDir +
         '&&set NO_PROXY=' + $env:NO_PROXY +
         '&&set no_proxy=' + $env:no_proxy +
         '&&set PYTHONUTF8=1' +
         '&&set PYTHONIOENCODING=utf-8' +
-        '&&chcp 65001>"%SystemRoot%\System32\NUL"' +
+        '&&chcp 65001>nul' +
         '&&title HermesGo Chat' +
         '&&"' + $pythonExe + '" -m hermes_cli.main'
 
@@ -720,15 +856,11 @@ try {
         }
     }
 
-    Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
-    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    Set-PortableProcessEnvironment -AppRoot $root
     Apply-ProxyBypassEnvironment
-    $env:PATH = [string]::Join(';', @($root, $runtimeBinDir, $env:PATH))
-    $env:HERMES_HOME = $homeDir
-    $env:OLLAMA_MODELS = $ollamaModelsDir
-    $env:PYTHONUTF8 = "1"
-    $env:PYTHONIOENCODING = "utf-8"
-    Write-LauncherLine "Portable target: standard Hermes runtime with portable Python."
+    Ensure-PortableHomeConfig -AppRoot $root
+    Write-LauncherLine ("Portable PATH: " + $env:PATH)
+    Write-LauncherLine "Portable target: standard Hermes runtime with portable Python only (no system Python on PATH)."
     Apply-CloudPreferredRouteIfAvailable
 
     Ensure-LocalOllamaReady
