@@ -114,6 +114,32 @@ function Set-PortableProcessEnvironment {
     $env:PYTHONIOENCODING = "utf-8"
 }
 
+function Ensure-PortableAuthFromProfile {
+    param([string]$AppRoot)
+
+    $portableAuth = Join-Path $AppRoot "home\auth.json"
+    if (Test-Path -LiteralPath $portableAuth) {
+        return
+    }
+
+    $profileHermes = Join-Path $env:USERPROFILE ".hermes"
+    $profileAuth = Join-Path $profileHermes "auth.json"
+    if (-not (Test-Path -LiteralPath $profileAuth)) {
+        return
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $portableAuth) -Force | Out-Null
+    Copy-Item -LiteralPath $profileAuth -Destination $portableAuth -Force
+    Write-LauncherLine "Imported auth.json from user profile (first portable run)"
+
+    $portableEnv = Join-Path $AppRoot "home\.env"
+    $profileEnv = Join-Path $profileHermes ".env"
+    if ((Test-Path -LiteralPath $profileEnv) -and -not (Test-Path -LiteralPath $portableEnv)) {
+        Copy-Item -LiteralPath $profileEnv -Destination $portableEnv -Force
+        Write-LauncherLine "Imported .env from user profile (first portable run)"
+    }
+}
+
 function Ensure-PortableHomeConfig {
     param([string]$AppRoot)
 
@@ -859,6 +885,7 @@ try {
 
     Set-PortableProcessEnvironment -AppRoot $root
     Apply-ProxyBypassEnvironment
+    Ensure-PortableAuthFromProfile -AppRoot $root
     Ensure-PortableHomeConfig -AppRoot $root
     Write-LauncherLine ("Portable PATH: " + $env:PATH)
     Write-LauncherLine "Portable target: standard Hermes runtime with portable Python only (no system Python on PATH)."

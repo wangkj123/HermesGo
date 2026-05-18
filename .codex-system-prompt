@@ -2,7 +2,10 @@
 
 On every conversation start:
 - Read `.cursorrules` from the project root.
-- If `.cursor/rules/*.mdc` exists, read the applicable files too.
+- Read `.cursor/rules/lessons-learned-auto-update.mdc` (always apply).
+- If working on HermesGo packaging/launch/selftest, read `.cursor/rules/hermesgo-packaging-selftest.mdc`.
+- Read other `.cursor/rules/*.mdc` when the task matches their globs.
+- After fixing any reproducible bug, append a lesson to the matching `.mdc` in the same turn (see lessons-learned-auto-update.mdc).
 - Apply all rules strictly.
 
 This is the only Codex auto-read prompt file in this repo.

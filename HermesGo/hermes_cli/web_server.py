@@ -148,7 +148,8 @@ def test_provider(body: ProviderTestRequest):
 
     # Prefer /models on OpenAI-compatible providers
     url = _openai_compatible_models_url(base_url)
-    if not url or api_mode not in ("chat_completions", "codex_responses"):
+    # Codex uses chatgpt.com/backend-api/codex — not OpenAI /v1/models.
+    if not url or api_mode not in ("chat_completions",):
         # Fallback: just report resolved runtime (still useful for debugging)
         return {
             "ok": True,

@@ -15,6 +15,8 @@
 - 只有在任务确实无法继续验证、且继续推进会偏离目标时，才允许暂停并说明阻塞点。
 
 ## 2. 工作原则
+- **修复即写规则（强制）**：每次修好可复现错误后，在同一轮任务内把「现象 / 错误做法 / 正确做法」追加到 `.cursor/rules/` 对应 `.mdc`（HermesGo 见 `hermesgo-packaging-selftest.mdc`；总则见 `lessons-learned-auto-update.mdc`）。不得只在对话或进度日志里总结而不更新规则。
+- 动手 HermesGo 打包、启动、Provider、自测前，必须先读 `.cursor/rules/hermesgo-packaging-selftest.mdc`。
 - 先理解再动手：先看现有文件、上下文和相邻配置，再做修改。
 - 以最小改动解决问题，优先小步迭代、边改边验证。
 - 复杂任务先拆分为可验证的小步骤，并在每步后更新进度。

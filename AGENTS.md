@@ -10,6 +10,14 @@
 - 每次对话开始时，必须先读取该文件并应用其中全部规则。
 - 与 Cursor 使用同一文件，保证行为一致。
 
+**修复即更新规则（必读，alwaysApply）**：`.cursor/rules/lessons-learned-auto-update.mdc`
+
+- 每次修好可复现 bug 后，必须把教训追加到对应 `.mdc`，避免同类错误重复出现。
+
+**HermesGo 打包/自测已知坑（改打包或启动前必读）**：`.cursor/rules/hermesgo-packaging-selftest.mdc`
+
+- Provider 名、Codex 探测、便携 PATH、Dashboard token、PS 5.1 启动等已列清单；新问题按 `lessons-learned-auto-update.mdc` 追加。
+
 **COM4/COM7 串口自治规则（必读）**：`.cursor/rules/usbcdc-com4-com7-autonomy.mdc`
 
 - 路径：`<项目根>/.cursor/rules/usbcdc-com4-com7-autonomy.mdc`

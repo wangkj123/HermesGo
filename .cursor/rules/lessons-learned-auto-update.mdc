@@ -1,0 +1,46 @@
+---
+description: 每次修复可复现错误后，必须把教训写入规则，避免重复犯错
+alwaysApply: true
+---
+
+# 修复即更新规则（强制）
+
+## 何时必须写规则
+
+满足任一条即视为「可复现教训」，**在本轮任务结束前**更新规则（不得只写在对话或 `agent-progress.md`）：
+
+- 同一类错误在本仓库已出现过，或用户说「又犯了」「总是重复」
+- 修复涉及 HermesGo 打包、启动器、便携路径、Provider/鉴权、Windows 编码/路径
+- 自测/冒烟失败后经排查才定位根因
+
+## 写到哪里
+
+| 范围 | 文件 |
+|------|------|
+| HermesGo 打包、启动、自测、Provider | `.cursor/rules/hermesgo-packaging-selftest.mdc` |
+| 串口 COM4/COM7 | `.cursor/rules/usbcdc-com4-com7-autonomy.mdc`（已有） |
+| WSL 跑 Windows 串口 | `.cursor/rules/usbcdc-windows-run-from-wsl.mdc`（已有） |
+| 跨领域、无更合适文件 | 新建 `.cursor/rules/<主题>-pitfalls.mdc`，`alwaysApply: false` + 合适 `globs` |
+
+## 每条教训的格式（追加到对应 .mdc）
+
+```markdown
+### YYYY-MM-DD — 简短标题
+- **现象**：用户/测试看到什么
+- **错误做法**：❌ 一行示例
+- **正确做法**：✅ 一行示例
+- **涉及文件**：路径（可选）
+```
+
+## 执行顺序
+
+1. 修代码并跑自测直到通过
+2. **同轮**在对应 `.mdc` 追加一条（若无合适文件则新建）
+3. 在 `logs/agent-progress.md` 记一行「已写入规则：xxx」
+4. 若 `.cursorrules` 需新索引，只加一行指向该 `.mdc`，不重复全文
+
+## 禁止
+
+- 只在聊天里总结、不写规则
+- 用错误 provider 名、错误 API 探测方式「再试一次」而不查规则
+- 覆盖或删除已有教训条目（只追加或标注 superseded）

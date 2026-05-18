@@ -1,0 +1,72 @@
+---
+description: HermesGo 绿色包打包、启动、自测、Provider 已知坑（持续追加）
+globs: HermesGo/**,create_hermes_go/**,dist/**,**/Start-HermesGo.ps1,**/build_zip*.py,**/smoke_*.py
+alwaysApply: false
+---
+
+# HermesGo 打包与自测 — 已知坑清单
+
+修改打包/启动/鉴权前 **先读本文件**。修复新问题后按 `lessons-learned-auto-update.mdc` **追加**条目。
+
+## 固定约定（每次必查）
+
+| 项 | ❌ 错误 | ✅ 正确 |
+|----|--------|--------|
+| Codex provider ID | `openai_codex` | `openai-codex` |
+| Provider 探测 | 对 `codex_responses` 调 `/v1/models` | 仅 `chat_completions` 探测 models；Codex 返回「已解析 runtime」 |
+| Dashboard `/api/*` | 无 Authorization | `Bearer` + 从 `/env?quick=1` HTML 取 `__HERMES_SESSION_TOKEN__` |
+| 便携 PATH | 含系统 Python/Anaconda | 仅 `app/runtime/python311`、`app`、`System32` |
+| `HERMES_HOME` | 用 `~/.hermes` 或仓库根 | `app/home`（zip 内 `HermesGo/app/home`） |
+| `.bat` | UTF-8 BOM | UTF-8 **无 BOM** |
+| PowerShell 路径 | 依赖 PATH 的 `powershell` | `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` |
+| PS 5.1 子进程环境 | `Start-Process -Environment` | `Start-ProcessWithEnvironment`（见 `Start-HermesGo.ps1`） |
+| Agent 终端命令 | `git` / `py` / `cmd` 裸调用 | 全路径：`Git\cmd\git.exe`、包内 `python.exe`、上述 `powershell.exe` |
+| 自测运行环境 | WSL 里测 COM/便携包 | **Windows 本机** Shell + 包内 Python 绝对路径 |
+| zip 根目录 | 散落 scripts/tools | 仅 `HermesGo.exe`、`README.txt`、三个 `.bat`；其余在 `app/` |
+| Windows 保留名 | zip 含 `nul` 等 | `packaging_safe.py` 跳过/校验；启动时 `Remove-WindowsReservedArtifacts` |
+
+## 已记录教训（按时间追加）
+
+### 2026-05-18 — Codex provider 测试 502
+- **现象**：`/api/providers/test` 对 openai-codex 返回 502
+- **错误做法**：`api_mode not in ("chat_completions", "codex_responses")` 时对 Codex base 调 `/v1/models`
+- **正确做法**：`api_mode not in ("chat_completions",)`；`codex_responses` 只报告 resolved runtime
+- **涉及文件**：`hermes_cli/web_server.py`（`runtime/hermes-agent` 与 `hermes_cli` 两处需同步）
+
+### 2026-05-18 — 配置 provider 拼写
+- **现象**：模型路由无效、runtime 解析异常
+- **错误做法**：`config.yaml` 写 `provider: "openai_codex"`
+- **正确做法**：`provider: "openai-codex"`（与 `models.py` / `runtime_provider.py` 一致）
+
+### 2026-05-18 — 便携包首次无密钥
+- **现象**：解压后 `app/home` 空，无法连模型
+- **错误做法**：假设用户手抄 API key；或强依赖 `~/.hermes` 路径
+- **正确做法**：`Ensure-PortableAuthFromProfile` 在**无** `app/home/auth.json` 时从 `%USERPROFILE%\.hermes\` 复制一次；默认 slim 模板 `packaging/config.yaml.slim-default` 为 deepseek，Codex 靠 `auth.json`
+
+### 2026-05-18 — Desktop 启动失败（PS 5.1）
+- **现象**：`Start-Process` 报 Environment 参数错误
+- **错误做法**：`Start-Process -Environment @{...}`
+- **正确做法**：`Start-ProcessWithEnvironment` 辅助函数
+
+### 2026-05-18 — 自测误判「未连接」
+- **现象**：Dashboard `/api/health` 401，以为服务挂了
+- **错误做法**：不带 token 调 `/api/*`
+- **正确做法**：根路径 `/` 或 `/health`（若存在）探活；API 用 session token；脚本见 `HermesGo/scripts/smoke_portable_connect.py`
+
+### 2026-05-18 — 构建后测试目录不同步
+- **现象**：修了源码但 `HermesGo-slim-test-v014` 仍是旧包
+- **错误做法**：只改 git 树不跑 sync
+- **正确做法**：`build_zip_slim.py` 结束后 `packaging_sync.sync_test_package_from_zip`；自测前可设 `HERMESGO_TEST_APP_ROOT` 指向 `...\HermesGo\app`
+
+## 自测命令（Windows）
+
+```powershell
+$env:HERMESGO_HEADLESS = "1"
+$env:HERMESGO_LAUNCH = "dashboard,webui"
+E:\AI\hermes\HermesGo-slim-test-v014\HermesGo\HermesGo.bat
+
+$env:HERMESGO_TEST_APP_ROOT = "E:\AI\hermes\HermesGo-slim-test-v014\HermesGo\app"
+E:\AI\hermes\HermesGo\runtime\python311\python.exe E:\AI\hermes\HermesGo\scripts\smoke_portable_connect.py
+```
+
+一键：`HermesGo\scripts\run_portable_selftest.ps1`
