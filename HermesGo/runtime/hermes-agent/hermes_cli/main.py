@@ -4735,15 +4735,19 @@ def cmd_dashboard(args):
         print("Install them with:  pip install hermes-agent[web]")
         sys.exit(1)
 
-    if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
-        sys.exit(1)
+    if "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
+        if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
+            sys.exit(1)
 
     from hermes_cli.web_server import start_server
+
+    embedded_chat = bool(getattr(args, "tui", False)) or os.environ.get("HERMES_DASHBOARD_TUI") == "1"
     start_server(
         host=args.host,
         port=args.port,
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
+        embedded_chat=embedded_chat,
     )
 
 
@@ -6463,6 +6467,16 @@ Examples:
     dashboard_parser.add_argument(
         "--insecure", action="store_true",
         help="Allow binding to non-localhost (DANGEROUS: exposes API keys on the network)",
+    )
+    dashboard_parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Embedded in-browser chat (Hermes Desktop passes this flag)",
+    )
+    dashboard_parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Serve pre-built web dist (set HERMES_WEB_DIST or use packaged web_dist)",
     )
     dashboard_parser.set_defaults(func=cmd_dashboard)
 

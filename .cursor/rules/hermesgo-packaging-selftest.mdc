@@ -53,6 +53,11 @@ alwaysApply: false
 - **错误做法**：不带 token 调 `/api/*`
 - **正确做法**：根路径 `/` 或 `/health`（若存在）探活；API 用 session token；脚本见 `HermesGo/scripts/smoke_portable_connect.py`
 
+### 2026-05-18 — Desktop 启动失败 `--tui`
+- **现象**：Desktop 窗口卡在启动/进不去；`app/home/logs/desktop.log` 有 `unrecognized arguments: --tui`
+- **错误做法**：只更新 Electron `Hermes.exe`，不更新捆绑的 `runtime/hermes-agent` CLI
+- **正确做法**：在 `hermes_cli/main.py` 的 `dashboard` 子命令增加 `--tui`、`--skip-build`；`cmd_dashboard` 识别 `HERMES_DASHBOARD_TUI`/`HERMES_WEB_DIST`；`HermesDesktop.bat` 用 `start /D runtime\hermes-desktop`
+
 ### 2026-05-18 — 构建后测试目录不同步
 - **现象**：修了源码但 `HermesGo-slim-test-v014` 仍是旧包
 - **错误做法**：只改 git 树不跑 sync
