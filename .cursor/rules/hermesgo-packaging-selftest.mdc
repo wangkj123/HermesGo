@@ -27,6 +27,7 @@ alwaysApply: false
 | dist 清理 | 保留每次构建的全部历史 zip | `build_zip_slim.py` 构建后 `prune_old_slim_zips` 只留最新 slim zip + `README.txt` |
 | 版本号 | zip 名 `v0.14.5` 但 `__version__` 仍 `0.14.2` | `packaging_release.SLIM_VERSION` + `ensure_runtime_version()` 打包前对齐 |
 | sync 校验 | 构建后不验证测试树 | `packaging_sync` 结束后 `verify_test_package_matches_zip`；失败 exit 1 |
+| 全量冒烟 | `Test-NetConnection` 等端口、Desktop 重复起 bat | `run_full_smoke_iter.ps1` 用 `Test-TcpPort`；Desktop 置 `HERMESGO_VERIFY_DESKTOP_ONLY=1` 且放最后 |
 | Windows 保留名 | zip 含 `nul` 等 | `packaging_safe.py` 跳过/校验；启动时 `Remove-WindowsReservedArtifacts` |
 
 ## 已记录教训（按时间追加）

@@ -32,12 +32,39 @@ def _app_root(package: str) -> str:
     return app
 
 
-def _http_ok(url: str) -> bool:
+def _http_ok(url: str, timeout: float = 6.0) -> bool:
     try:
-        with urllib.request.urlopen(url, timeout=6) as resp:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
             return 200 <= resp.status < 400
     except Exception:
         return False
+
+
+def _services_already_up(app: str, desktop_exe: str, log_path: str) -> bool:
+    """True when launcher already started gateway/dashboard/desktop (skip re-launching bat)."""
+    if not _http_ok("http://127.0.0.1:9119/", timeout=4.0):
+        return False
+    home = os.path.join(app, "home")
+    agent_root = os.path.join(app, "runtime", "hermes-agent")
+    if os.path.isdir(agent_root):
+        saved = sys.path[:]
+        try:
+            if agent_root not in sys.path:
+                sys.path.insert(0, agent_root)
+            os.environ.setdefault("HERMES_HOME", home)
+            from gateway.status import get_running_pid
+
+            if not get_running_pid():
+                return False
+        except Exception:
+            return False
+        finally:
+            sys.path[:] = saved
+    if os.path.isfile(log_path):
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+        if "Remote Hermes backend is ready" in text or "backend is ready" in text:
+            return True
+    return _desktop_process_running(desktop_exe)
 
 
 def _desktop_process_running(desktop_exe: str) -> bool:
@@ -70,18 +97,37 @@ def _desktop_process_running(desktop_exe: str) -> bool:
     return ps.returncode == 0 and bool(ps.stdout.strip())
 
 
+def _wait_for_desktop_log(log_path: str, timeout_sec: float = 45.0) -> str:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if os.path.isfile(log_path):
+            text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+            if "Remote Hermes backend is ready" in text or "backend is ready" in text:
+                return text
+            if "unrecognized arguments: --tui" in text:
+                return text
+            if "Desktop boot failed" in text:
+                return text
+        time.sleep(1)
+    return Path(log_path).read_text(encoding="utf-8", errors="replace") if os.path.isfile(log_path) else ""
+
+
 def main() -> int:
-    verify_only = "--verify-only" in sys.argv or os.environ.get("HERMESGO_VERIFY_DESKTOP_ONLY", "").strip() in (
-        "1",
-        "true",
-        "yes",
-    )
     package = _package_root()
     app = _app_root(package)
     bat = os.path.join(package, "HermesDesktop.bat")
     py = os.path.join(app, "runtime", "python311", "python.exe")
     desktop_exe = os.path.join(app, "runtime", "hermes-desktop", "Hermes.exe")
     log_path = os.path.join(app, "home", "logs", "desktop.log")
+
+    verify_only = "--verify-only" in sys.argv or os.environ.get("HERMESGO_VERIFY_DESKTOP_ONLY", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if not verify_only and _services_already_up(app, desktop_exe, log_path):
+        verify_only = True
+        print("SKIP launch (services already up; verify-only)")
 
     if not os.path.isfile(bat):
         print(f"FAIL missing {bat}")
@@ -107,7 +153,7 @@ def main() -> int:
     env.pop("HERMESGO_HEADLESS", None)
     env.pop("HERMESGO_ALLOW_HEADLESS", None)
 
-    if os.path.isfile(log_path):
+    if not verify_only and os.path.isfile(log_path):
         try:
             os.remove(log_path)
         except OSError:
@@ -133,13 +179,13 @@ def main() -> int:
             print(f"FAIL HermesDesktop.bat exit {proc.returncode}")
             return 1
         print("OK HermesDesktop.bat exit 0")
-    else:
-        print("SKIP launch (verify-only; services already up)")
+    elif verify_only:
+        print("SKIP launch (verify-only)")
 
     remote_ready = False
     local_ready = False
-    if os.path.isfile(log_path):
-        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    text = _wait_for_desktop_log(log_path, timeout_sec=20.0 if verify_only else 60.0)
+    if text:
         if "unrecognized arguments: --tui" in text:
             print("FAIL --tui error in desktop.log")
             return 1
@@ -192,12 +238,14 @@ def main() -> int:
         env = os.environ.copy()
         env["HERMES_RUNTIME_DIR"] = agent_root
         env["HERMES_DASHBOARD_URL"] = "http://127.0.0.1:9119/"
+        py_exe = py if os.path.isfile(py) else sys.executable
         for attempt in range(15):
             rc = subprocess.run(
-                [sys.executable, check_script],
+                [py_exe, check_script],
                 env=env,
                 capture_output=True,
                 text=True,
+                timeout=15,
             ).returncode
             if rc == 0:
                 print("OK dashboard API gateway_running=true")
