@@ -52,7 +52,11 @@ create_hermes_go/.scratch/
 
 # Local test extract (synced from dist zip; not source)
 HermesGo-slim-test-v014/
+_tmp_desktop_asar/
 
 # Large portable runtimes (built or vendored; not git source)
 HermesGo/runtime/hermes-desktop/
 HermesGo/runtime/hermes-webui/
+
+HermesGo/web/node_modules/
+

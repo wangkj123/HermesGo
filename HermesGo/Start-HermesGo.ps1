@@ -3,7 +3,9 @@
     [switch]$NoOpenChat,
     [switch]$NoOpenDesktop,
     [switch]$DesktopOnly,
+    [switch]$WebUIOnly,
     [int]$DashboardTimeoutSec = 45,
+    [int]$GatewayTimeoutSec = 90,
     [int]$DesktopTimeoutSec = 60
 )
 
@@ -194,7 +196,11 @@ function Start-ProcessWithEnvironment {
     $saved = @{}
     foreach ($key in $Environment.Keys) {
         $saved[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
-        Set-Item -Path ("Env:" + $key) -Value $Environment[$key]
+        if ($null -eq $Environment[$key] -or [string]::IsNullOrEmpty([string]$Environment[$key])) {
+            Remove-Item -Path ("Env:" + $key) -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path ("Env:" + $key) -Value $Environment[$key]
+        }
     }
 
     try {
@@ -239,13 +245,16 @@ $tmpLogDir = Join-Path $root "logs\tmp"
 $debugLog = Join-Path $root "HermesGo-debug.txt"
 $dashboardOutLog = Join-Path $tmpLogDir "HermesGo-dashboard.out.txt"
 $dashboardErrLog = Join-Path $tmpLogDir "HermesGo-dashboard.err.txt"
+$gatewayOutLog = Join-Path $tmpLogDir "HermesGo-gateway.out.txt"
+$gatewayErrLog = Join-Path $tmpLogDir "HermesGo-gateway.err.txt"
 $dashboardUrl = "http://127.0.0.1:9119/"
 $dashboardBrowserUrl = "http://127.0.0.1:9119/env?quick=1"
 $webuiUrl = "http://127.0.0.1:8787/"
 $webuiDir = Join-Path $root "runtime\hermes-webui"
 $desktopDir = Join-Path $root "runtime\hermes-desktop"
 $desktopExe = Join-Path $desktopDir "Hermes.exe"
-$headless = $env:HERMESGO_HEADLESS -eq "1"
+# Headless only when CI explicitly sets both vars (normal exe/bat always opens browsers + Desktop).
+$headless = ($env:HERMESGO_HEADLESS -eq "1") -and ($env:HERMESGO_ALLOW_HEADLESS -eq "1")
 $preserveDebugLog = $env:HERMESGO_APPEND_DEBUG_LOG -eq "1"
 $proxyBypassDefaults = @(
     "localhost",
@@ -525,6 +534,17 @@ function Get-HermesEnvValue {
         return $value.Trim()
     }
 
+    foreach ($scope in @("User", "Machine")) {
+        $value = [Environment]::GetEnvironmentVariable($Key, $scope)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim()
+        }
+    }
+
+    if ($Key -eq "DEEPSEEK_API_KEY" -and -not [string]::IsNullOrWhiteSpace($env:HERMESGO_DEEPSEEK_API_KEY)) {
+        return $env:HERMESGO_DEEPSEEK_API_KEY.Trim()
+    }
+
     $envPath = Join-Path $homeDir ".env"
     if (-not (Test-Path -LiteralPath $envPath)) {
         return ""
@@ -546,6 +566,156 @@ function Get-HermesEnvValue {
     }
 
     return ""
+}
+
+function Read-DotEnvFile {
+    param([string]$Path)
+
+    $result = @{}
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $result
+    }
+    foreach ($line in (Get-Content -LiteralPath $Path -Encoding utf8)) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) {
+            continue
+        }
+        $parts = $trimmed.Split("=", 2)
+        $name = $parts[0].Trim()
+        $value = $parts[1].Trim().Trim('"').Trim("'")
+        if ($name) {
+            $result[$name] = $value
+        }
+    }
+    return $result
+}
+
+function Set-DotEnvValue {
+    param(
+        [string]$Path,
+        [string]$Key,
+        [string]$Value
+    )
+
+    $lines = @()
+    if (Test-Path -LiteralPath $Path) {
+        $lines = @(Get-Content -LiteralPath $Path -Encoding utf8)
+    }
+    $found = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $trimmed = $lines[$i].Trim()
+        if ($trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) {
+            continue
+        }
+        $name = ($trimmed.Split("=", 2)[0]).Trim()
+        if ($name -eq $Key) {
+            $lines[$i] = "$Key=$Value"
+            $found = $true
+            break
+        }
+    }
+    if (-not $found) {
+        $lines += "$Key=$Value"
+    }
+    $parent = Split-Path -Parent $Path
+    if ($parent) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    Set-Content -LiteralPath $Path -Value ($lines -join "`n") -Encoding utf8
+}
+
+function Merge-PortableEnvFromKnownSources {
+    $portableEnv = Join-Path $homeDir ".env"
+    $current = Read-DotEnvFile -Path $portableEnv
+    $sources = @(
+        (Join-Path $env:USERPROFILE ".hermes\.env"),
+        (Join-Path $root "..\home\.env"),
+        (Join-Path $root "..\..\HermesGo\home\.env"),
+        (Join-Path (Split-Path -Parent (Split-Path -Parent $root)) "HermesGo\home\.env")
+    )
+    $merged = $false
+    foreach ($source in $sources) {
+        $resolved = Resolve-PortablePath -Path $source
+        if (-not (Test-Path -LiteralPath $resolved)) {
+            continue
+        }
+        foreach ($entry in (Read-DotEnvFile -Path $resolved).GetEnumerator()) {
+            if ([string]::IsNullOrWhiteSpace($current[$entry.Key]) -and -not [string]::IsNullOrWhiteSpace($entry.Value)) {
+                $current[$entry.Key] = $entry.Value
+                $merged = $true
+                Write-LauncherLine "Imported $($entry.Key) from $resolved"
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:HERMESGO_DEEPSEEK_API_KEY)) {
+        if ([string]::IsNullOrWhiteSpace($current["DEEPSEEK_API_KEY"])) {
+            $current["DEEPSEEK_API_KEY"] = $env:HERMESGO_DEEPSEEK_API_KEY.Trim()
+            $merged = $true
+            Write-LauncherLine "Imported DEEPSEEK_API_KEY from HERMESGO_DEEPSEEK_API_KEY"
+        }
+    }
+    if ($merged) {
+        $lines = @(
+            "# Hermes portable API keys (Dashboard http://127.0.0.1:9119/env)"
+        )
+        foreach ($entry in ($current.GetEnumerator() | Sort-Object Name)) {
+            if ([string]::IsNullOrWhiteSpace($entry.Value)) {
+                $lines += "$($entry.Key)="
+            } else {
+                $lines += "$($entry.Key)=$($entry.Value)"
+            }
+        }
+        Set-Content -LiteralPath $portableEnv -Value ($lines -join "`n") -Encoding utf8
+    }
+}
+
+function Import-PortableDotEnv {
+    $envPath = Join-Path $homeDir ".env"
+    if (-not (Test-Path -LiteralPath $envPath)) {
+        return
+    }
+
+    foreach ($entry in (Read-DotEnvFile -Path $envPath).GetEnumerator()) {
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key, "Process"))) {
+            Set-Item -Path ("Env:" + $entry.Key) -Value $entry.Value
+        }
+    }
+}
+
+function Get-PortableSecretEnv {
+    $secrets = @{}
+    $deepseekKey = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
+    if (-not [string]::IsNullOrWhiteSpace($deepseekKey)) {
+        $secrets["DEEPSEEK_API_KEY"] = $deepseekKey
+    }
+    $deepseekBase = Get-HermesEnvValue -Key "DEEPSEEK_BASE_URL"
+    if (-not [string]::IsNullOrWhiteSpace($deepseekBase)) {
+        $secrets["DEEPSEEK_BASE_URL"] = $deepseekBase
+    }
+    return $secrets
+}
+
+function Add-PortableSecretEnv {
+    param([hashtable]$Target)
+
+    foreach ($entry in (Get-PortableSecretEnv).GetEnumerator()) {
+        $Target[$entry.Key] = $entry.Value
+    }
+    return $Target
+}
+
+function Ensure-PortableDeepSeekEnvTemplate {
+    $envPath = Join-Path $homeDir ".env"
+    if (Test-Path -LiteralPath $envPath) {
+        return
+    }
+    $template = @"
+# Hermes portable API keys (also editable in Dashboard http://127.0.0.1:9119/env)
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+"@
+    Set-Content -LiteralPath $envPath -Value $template -Encoding utf8
+    Write-LauncherLine "Created app\home\.env template for DEEPSEEK_API_KEY"
 }
 
 function Set-ConfigModelRoute {
@@ -578,21 +748,38 @@ function Set-ConfigModelRoute {
     return $true
 }
 
+function Test-CodexAuthExhausted {
+    $authPath = Join-Path $homeDir "auth.json"
+    if (-not (Test-Path -LiteralPath $authPath)) {
+        return $false
+    }
+    $text = Get-Content -LiteralPath $authPath -Raw -Encoding utf8
+    return ($text -match '"last_status"\s*:\s*"exhausted"') -or ($text -match 'usage limit has been reached')
+}
+
 function Apply-CloudPreferredRouteIfAvailable {
-    # Only auto-upgrade when still on local ollama fallback.
+    $deepseekKey = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
     $provider = Get-ConfigModelProvider
-    if ($provider -and $provider -ne "ollama") {
-        Write-LauncherLine "Cloud auto-route skipped: current provider is $provider"
+    $codexExhausted = Test-CodexAuthExhausted
+
+    if (-not [string]::IsNullOrWhiteSpace($deepseekKey)) {
+        if (Set-ConfigModelRoute -Provider "deepseek" -Model "deepseek-v4-flash" -BaseUrl "https://api.deepseek.com/v1") {
+            Write-LauncherLine "Cloud auto-route applied: deepseek/deepseek-v4-flash (DEEPSEEK_API_KEY)"
+        } else {
+            Write-LauncherLine "Cloud route already deepseek (DEEPSEEK_API_KEY present)"
+        }
         return
     }
 
-    $deepseekKey = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
-    if (-not [string]::IsNullOrWhiteSpace($deepseekKey)) {
-        if (Set-ConfigModelRoute -Provider "deepseek" -Model "deepseek-v4-pro" -BaseUrl "https://api.deepseek.com/v1") {
-            Write-LauncherLine "Cloud auto-route applied: deepseek/deepseek-v4-pro"
-        } else {
-            Write-LauncherLine "Cloud auto-route already set: deepseek/deepseek-v4-pro"
+    if ($codexExhausted -or $provider -eq "openai-codex") {
+        if (Set-ConfigModelRoute -Provider "deepseek" -Model "deepseek-v4-flash" -BaseUrl "https://api.deepseek.com/v1") {
+            Write-LauncherLine "Switched model route to deepseek (Codex exhausted or unavailable; set DEEPSEEK_API_KEY in app\home\.env)"
         }
+        return
+    }
+
+    if ($provider -and $provider -ne "ollama") {
+        Write-LauncherLine "Cloud auto-route skipped: current provider is $provider"
         return
     }
 }
@@ -663,9 +850,97 @@ function Ensure-LocalOllamaReady {
     Ensure-BundledOllamaModel -OllamaExe $ollamaExe -ModelName $ollamaConfig.Model
 }
 
-function Test-DashboardReady {
+function Test-GatewayRunning {
+    $check = @"
+import sys
+sys.path.insert(0, r'$runtimeDir')
+from gateway.status import get_running_pid
+raise SystemExit(0 if get_running_pid() else 1)
+"@
+    & $pythonExe -c $check 2>$null | Out-Null
+    return $LASTEXITCODE -eq 0
+}
+
+function Start-GatewayProcess {
+    if (Test-GatewayRunning) {
+        Write-LauncherLine "Hermes gateway already running for profile: $homeDir"
+        return
+    }
+
+    $listener = Get-NetTCPConnection -LocalPort 8642 -State Listen -ErrorAction SilentlyContinue
+    if ($listener) {
+        $listener | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+            if ($_ -and $_ -ne $PID) {
+                Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    Remove-Item -LiteralPath $gatewayOutLog, $gatewayErrLog -Force -ErrorAction SilentlyContinue
+    $gatewayEnv = @{
+        HERMES_HOME          = $homeDir
+        PATH                 = $env:PATH
+        PYTHONUTF8           = "1"
+        PYTHONIOENCODING     = "utf-8"
+        OLLAMA_MODELS        = $ollamaModelsDir
+        NO_PROXY             = $env:NO_PROXY
+    }
+    $gatewayEnv = Add-PortableSecretEnv -Target $gatewayEnv
+    $savedGatewayEnv = @{}
+    foreach ($key in $gatewayEnv.Keys) {
+        $savedGatewayEnv[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+        Set-Item -Path ("Env:" + $key) -Value $gatewayEnv[$key]
+    }
+    if ($env:NO_PROXY) { $env:no_proxy = $env:NO_PROXY }
     try {
-        $response = Invoke-DirectHttpRequest -Uri $dashboardUrl -TimeoutSec 3
+        $process = Start-Process -FilePath $pythonExe `
+            -ArgumentList @("-m", "hermes_cli.main", "gateway", "run", "--replace", "--quiet") `
+            -WorkingDirectory $runtimeDir `
+            -RedirectStandardOutput $gatewayOutLog `
+            -RedirectStandardError $gatewayErrLog `
+            -PassThru `
+            -WindowStyle Hidden
+    } finally {
+        foreach ($key in $gatewayEnv.Keys) {
+            if ($null -eq $savedGatewayEnv[$key] -or $savedGatewayEnv[$key].Length -eq 0) {
+                Remove-Item -Path ("Env:" + $key) -ErrorAction SilentlyContinue
+            } else {
+                Set-Item -Path ("Env:" + $key) -Value $savedGatewayEnv[$key]
+            }
+        }
+    }
+    Write-LauncherLine "Hermes gateway process started: PID $($process.Id)"
+
+    $deadline = (Get-Date).AddSeconds($GatewayTimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-GatewayRunning) {
+            Write-LauncherLine "Hermes gateway probe succeeded (gateway.pid)."
+            Add-DebugBlock -Label "gateway stdout" -Path $gatewayOutLog
+            Add-DebugBlock -Label "gateway stderr" -Path $gatewayErrLog
+            return
+        }
+        if ($process.HasExited) {
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    $errTail = ""
+    if (Test-Path -LiteralPath $gatewayErrLog) {
+        $errTail = (Get-Content -LiteralPath $gatewayErrLog -Tail 30 -Encoding utf8) -join " "
+    }
+    Add-DebugBlock -Label "gateway stdout" -Path $gatewayOutLog
+    Add-DebugBlock -Label "gateway stderr" -Path $gatewayErrLog
+    throw "Hermes gateway probe failed. $errTail".Trim()
+}
+
+function Test-DashboardReady {
+    if (-not (Test-ListeningPort -Port 9119)) {
+        return $false
+    }
+    try {
+        $response = Invoke-DirectHttpRequest -Uri $dashboardUrl -TimeoutSec 12
         return $response.StatusCode -eq 200 -and $response.Content -match "<title>Hermes Agent</title>"
     } catch {
         return $false
@@ -682,40 +957,164 @@ function Test-WebUIReady {
     }
 }
 
-function Start-DashboardProcess {
-    if (Test-DashboardReady) {
-        Write-LauncherLine "Dashboard already reachable: $dashboardUrl"
+function Stop-DashboardListener {
+    $listener = Get-NetTCPConnection -LocalPort 9119 -State Listen -ErrorAction SilentlyContinue
+    if (-not $listener) {
         return
     }
+    $listener | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+        if ($_ -and $_ -ne $PID) {
+            Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Start-Sleep -Seconds 1
+}
 
-    $listener = Get-NetTCPConnection -LocalPort 9119 -State Listen -ErrorAction SilentlyContinue
-    if ($listener) {
-        $listener | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
-            if ($_ -and $_ -ne $PID) {
-                Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+function Get-DashboardSessionToken {
+    if (-not (Test-DashboardReady)) {
+        throw "Dashboard is not ready on 9119; cannot read session token for Desktop/WebUI."
+    }
+    $response = Invoke-DirectHttpRequest -Uri $dashboardBrowserUrl -TimeoutSec 12
+    if ($response.StatusCode -ne 200) {
+        throw "Dashboard /env returned HTTP $($response.StatusCode)"
+    }
+    if ($response.Content -match '__HERMES_SESSION_TOKEN__\s*=\s*["'']([^"'']+)') {
+        return $Matches[1]
+    }
+    throw "Session token not found in $($dashboardBrowserUrl) (log in via Dashboard first)."
+}
+
+function Test-DashboardGatewayRunning {
+    $checkScript = Join-Path $root "scripts\check_dashboard_gateway.py"
+    if (-not (Test-Path -LiteralPath $checkScript)) {
+        $checkScript = Join-Path $PSScriptRoot "scripts\check_dashboard_gateway.py"
+    }
+    if (-not (Test-Path -LiteralPath $checkScript)) {
+        return $false
+    }
+
+    $savedRuntime = $env:HERMES_RUNTIME_DIR
+    $env:HERMES_RUNTIME_DIR = $runtimeDir
+    $env:HERMES_DASHBOARD_URL = $dashboardUrl
+    try {
+        & $pythonExe $checkScript 2>$null | Out-Null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        if ($null -eq $savedRuntime) {
+            Remove-Item Env:HERMES_RUNTIME_DIR -ErrorAction SilentlyContinue
+        } else {
+            $env:HERMES_RUNTIME_DIR = $savedRuntime
+        }
+    }
+}
+
+function Start-DashboardProcess {
+    $localGateway = Test-GatewayRunning
+    $apiGateway = $false
+    if (Test-DashboardReady) {
+        $apiGateway = Test-DashboardGatewayRunning
+    }
+    $agentLog = Join-Path $homeDir "logs\agent.log"
+    $embeddedChatOk = $false
+    if (Test-Path -LiteralPath $agentLog) {
+        $logTail = (Get-Content -LiteralPath $agentLog -Tail 40 -Encoding utf8 -ErrorAction SilentlyContinue) -join "`n"
+        $embeddedChatOk = $logTail -match "embedded_chat=True"
+    }
+
+    if (Test-DashboardReady -and $localGateway -and $apiGateway -and $embeddedChatOk) {
+        Write-LauncherLine "Dashboard already reachable with gateway running: $dashboardUrl"
+        return
+    }
+    if (Test-DashboardReady -and -not $embeddedChatOk) {
+        Write-LauncherLine "Dashboard on 9119 up but embedded_chat disabled; restarting for Desktop."
+    }
+    if (Test-DashboardReady) {
+        if ($localGateway -and -not $apiGateway) {
+            Write-LauncherLine "Dashboard on 9119 is stale (local gateway up, API says down); restarting."
+        } else {
+            Write-LauncherLine "Dashboard on 9119 is stale or gateway not running; restarting."
+        }
+    }
+
+    Stop-DashboardListener
+
+    Remove-Item -LiteralPath $dashboardOutLog, $dashboardErrLog -Force -ErrorAction SilentlyContinue
+    $dashEnvKeys = @("HERMES_HOME", "PATH", "PYTHONUTF8", "PYTHONIOENCODING", "NO_PROXY", "no_proxy", "HERMES_DASHBOARD_TUI")
+    $savedDashEnv = @{}
+    foreach ($key in $dashEnvKeys) {
+        $savedDashEnv[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+    }
+    $env:HERMES_HOME = $homeDir
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:HERMES_DASHBOARD_TUI = "1"
+    foreach ($entry in (Get-PortableSecretEnv).GetEnumerator()) {
+        Set-Item -Path ("Env:" + $entry.Key) -Value $entry.Value
+    }
+
+    try {
+        $process = Start-Process -FilePath $pythonExe `
+            -ArgumentList @("-m", "hermes_cli.main", "dashboard", "--host", "127.0.0.1", "--port", "9119", "--no-open", "--tui") `
+            -WorkingDirectory $runtimeDir `
+            -RedirectStandardOutput $dashboardOutLog `
+            -RedirectStandardError $dashboardErrLog `
+            -PassThru `
+            -WindowStyle Hidden
+    } finally {
+        foreach ($key in $dashEnvKeys) {
+            if ($null -eq $savedDashEnv[$key] -or $savedDashEnv[$key].Length -eq 0) {
+                Remove-Item -Path ("Env:" + $key) -ErrorAction SilentlyContinue
+            } else {
+                Set-Item -Path ("Env:" + $key) -Value $savedDashEnv[$key]
             }
         }
     }
 
-    Remove-Item -LiteralPath $dashboardOutLog, $dashboardErrLog -Force -ErrorAction SilentlyContinue
-    $process = Start-Process -FilePath $pythonExe `
-        -ArgumentList @("-m", "hermes_cli.main", "dashboard", "--host", "127.0.0.1", "--port", "9119", "--no-open") `
-        -WorkingDirectory $runtimeDir `
-        -RedirectStandardOutput $dashboardOutLog `
-        -RedirectStandardError $dashboardErrLog `
-        -PassThru `
-        -WindowStyle Hidden
+    if (-not $process) {
+        throw "Failed to start Dashboard process on port 9119"
+    }
     Write-LauncherLine "Dashboard process started: PID $($process.Id)"
 
     $deadline = (Get-Date).AddSeconds($DashboardTimeoutSec)
+    $dashboardHttpSeen = $false
     while ((Get-Date) -lt $deadline) {
         if (Test-DashboardReady) {
-            Write-LauncherLine "Dashboard probe succeeded."
-            Add-DebugBlock -Label "dashboard stdout" -Path $dashboardOutLog
-            Add-DebugBlock -Label "dashboard stderr" -Path $dashboardErrLog
-            return
+            if (Test-DashboardGatewayRunning) {
+                Write-LauncherLine "Dashboard probe succeeded."
+                Write-LauncherLine "Dashboard reports gateway_running=true."
+                return
+            }
+            if (-not $dashboardHttpSeen) {
+                Write-LauncherLine "Dashboard HTTP is up; waiting for gateway_running=true..."
+                $dashboardHttpSeen = $true
+            }
+        }
+        if ($process.HasExited) {
+            break
         }
         Start-Sleep -Seconds 1
+    }
+
+    if (Test-DashboardReady) {
+        if (Test-DashboardGatewayRunning) {
+            Write-LauncherLine "Dashboard probe succeeded."
+            Write-LauncherLine "Dashboard reports gateway_running=true."
+            return
+        } else {
+            Add-DebugBlock -Label "dashboard stdout" -Path $dashboardOutLog
+            Add-DebugBlock -Label "dashboard stderr" -Path $dashboardErrLog
+            throw "Dashboard is reachable but gateway_running=false after ${DashboardTimeoutSec}s (see home\\gateway.pid)."
+        }
+    }
+
+    if ($process.HasExited) {
+        $errTail = ""
+        if (Test-Path -LiteralPath $dashboardErrLog) {
+            $errTail = (Get-Content -LiteralPath $dashboardErrLog -Tail 20 -Encoding utf8) -join " "
+        }
+        Add-DebugBlock -Label "dashboard stdout" -Path $dashboardOutLog
+        Add-DebugBlock -Label "dashboard stderr" -Path $dashboardErrLog
+        throw "Dashboard probe failed. $errTail".Trim()
     }
 
     $errTail = ""
@@ -727,18 +1126,36 @@ function Start-DashboardProcess {
     throw "Dashboard probe failed. $errTail".Trim()
 }
 
+function Test-WebUIGatewayAlive {
+    if (-not (Test-WebUIReady)) {
+        return $false
+    }
+    try {
+        $response = Invoke-DirectHttpRequest -Uri "http://127.0.0.1:8787/api/health/agent" -TimeoutSec 8
+        if ($response.StatusCode -ne 200) {
+            return $false
+        }
+        return $response.Content -match '"alive"\s*:\s*true'
+    } catch {
+        return $false
+    }
+}
+
 function Start-WebUIProcess {
     if (Test-WebUIReady) {
-        Write-LauncherLine "WebUI already reachable: $webuiUrl"
-        return
-    }
-
-    $listener = Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue
-    if ($listener) {
-        $listener | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
-            if ($_ -and $_ -ne $PID) {
-                Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+        if (Test-WebUIGatewayAlive) {
+            Write-LauncherLine "WebUI already reachable with gateway alive: $webuiUrl"
+            return
+        }
+        Write-LauncherLine "WebUI on 8787 is up but gateway not alive; restarting WebUI after gateway."
+        $listener = Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue
+        if ($listener) {
+            $listener | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+                if ($_ -and $_ -ne $PID) {
+                    Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+                }
             }
+            Start-Sleep -Seconds 1
         }
     }
 
@@ -748,23 +1165,58 @@ function Start-WebUIProcess {
         return
     }
 
-    $process = Start-Process -FilePath $pythonExe `
-        -ArgumentList @($runPy) `
-        -WorkingDirectory $webuiDir `
-        -PassThru `
-        -WindowStyle Hidden
+    $webuiEnv = @{
+        HERMES_HOME            = $homeDir
+        HERMES_WEBUI_AGENT_DIR = $runtimeDir
+        PATH                   = $env:PATH
+        PYTHONUTF8             = "1"
+        PYTHONIOENCODING       = "utf-8"
+        NO_PROXY               = $env:NO_PROXY
+    }
+    $webuiEnv = Add-PortableSecretEnv -Target $webuiEnv
+    $savedWebuiEnv = @{}
+    foreach ($key in $webuiEnv.Keys) {
+        $savedWebuiEnv[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+        Set-Item -Path ("Env:" + $key) -Value $webuiEnv[$key]
+    }
+    if ($env:NO_PROXY) { $env:no_proxy = $env:NO_PROXY }
+    try {
+        $process = Start-Process -FilePath $pythonExe `
+            -ArgumentList @($runPy) `
+            -WorkingDirectory $webuiDir `
+            -PassThru `
+            -WindowStyle Hidden
+    } finally {
+        foreach ($key in $webuiEnv.Keys) {
+            if ($null -eq $savedWebuiEnv[$key] -or $savedWebuiEnv[$key].Length -eq 0) {
+                Remove-Item -Path ("Env:" + $key) -ErrorAction SilentlyContinue
+            } else {
+                Set-Item -Path ("Env:" + $key) -Value $savedWebuiEnv[$key]
+            }
+        }
+    }
     Write-LauncherLine "WebUI process started: PID $($process.Id)"
 
-    $deadline = (Get-Date).AddSeconds(30)
+    $deadline = (Get-Date).AddSeconds(45)
     while ((Get-Date) -lt $deadline) {
-        if (Test-ListeningPort -Port 8787) {
-            Write-LauncherLine "WebUI probe succeeded."
-            return
+        if (Test-WebUIReady) {
+            if (Test-WebUIGatewayAlive) {
+                Write-LauncherLine "WebUI probe succeeded; gateway alive on /api/health/agent."
+                return
+            }
+            Write-LauncherLine "WebUI HTTP up but gateway not alive yet (waiting)..."
+        }
+        if ($process.HasExited) {
+            break
         }
         Start-Sleep -Seconds 1
     }
 
-    Write-LauncherLine "WebUI probe timed out after 30s (PID $($process.Id) may still be starting)"
+    if (Test-WebUIReady -and -not (Test-WebUIGatewayAlive)) {
+        Write-LauncherLine "WARNING: WebUI up but /api/health/agent reports gateway not alive (see app\home\gateway.pid)"
+    } elseif (-not (Test-WebUIReady)) {
+        Write-LauncherLine "WebUI probe timed out after 45s (PID $($process.Id) may still be starting)"
+    }
 }
 
 function Start-HermesDesktopProcess {
@@ -776,23 +1228,42 @@ function Start-HermesDesktopProcess {
     $running = Get-Process -Name "Hermes" -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -and ($_.Path -eq $desktopExe) } |
         Select-Object -First 1
+
+    if (-not (Test-DashboardReady)) {
+        throw "Dashboard on 9119 must be running before Desktop (shared login/config)."
+    }
+    $dashboardToken = Get-DashboardSessionToken
+    $dashboardBase = $dashboardUrl.TrimEnd("/")
+
     if ($running) {
-        Write-LauncherLine "Hermes Desktop already running: PID $($running.Id)"
-        return
+        Write-LauncherLine "Hermes Desktop already running: PID $($running.Id); restarting to bind current Dashboard/gateway."
+        try {
+            Stop-Process -Id $running.Id -Force -ErrorAction Stop
+            Wait-Process -Id $running.Id -Timeout 8 -ErrorAction SilentlyContinue
+        } catch {
+            Write-LauncherLine "WARNING: failed to stop existing Hermes Desktop PID $($running.Id): $($_.Exception.Message)"
+        }
     }
 
+    $desktopLogPath = Join-Path $homeDir "logs\desktop.log"
+    Remove-Item -LiteralPath $desktopLogPath -Force -ErrorAction SilentlyContinue
+
     $desktopEnv = @{
-        HERMES_HOME = $homeDir
-        HERMES_DESKTOP_HERMES_ROOT = $runtimeDir
-        HERMES_DESKTOP_PYTHON = $pythonExe
+        HERMES_HOME                  = $homeDir
+        HERMES_DESKTOP_HERMES_ROOT   = $runtimeDir
+        HERMES_DESKTOP_PYTHON        = $pythonExe
+        HERMES_DESKTOP_REMOTE_URL    = $dashboardBase
+        HERMES_DESKTOP_REMOTE_TOKEN  = $dashboardToken
+        ELECTRON_RUN_AS_NODE         = $null
     }
+    $desktopEnv = Add-PortableSecretEnv -Target $desktopEnv
 
     $process = Start-ProcessWithEnvironment `
         -FilePath $desktopExe `
         -WorkingDirectory $desktopDir `
         -Environment $desktopEnv `
         -WindowStyle "Normal"
-    Write-LauncherLine "Hermes Desktop started: PID $($process.Id)"
+    Write-LauncherLine "Hermes Desktop started (remote -> $dashboardBase): PID $($process.Id)"
     return $process
 }
 
@@ -815,19 +1286,23 @@ function Wait-HermesDesktopReady {
 
         if (Test-Path -LiteralPath $logPath) {
             $logText = Get-Content -LiteralPath $logPath -Raw -ErrorAction SilentlyContinue
+            if ($logText -match "Remote Hermes backend is ready") {
+                Write-LauncherLine "Hermes Desktop probe succeeded (remote backend on 9119)."
+                return 9119
+            }
+            if ($logText -match "backend is ready") {
+                for ($port = 9120; $port -le 9199; $port++) {
+                    if (Test-ListeningPort -Port $port) {
+                        Write-LauncherLine "Hermes Desktop probe succeeded on local port $port"
+                        return $port
+                    }
+                }
+            }
             if ($logText -match "unrecognized arguments: --tui") {
                 throw "Hermes Desktop backend failed: dashboard CLI does not support --tui (update hermes-agent)"
             }
             if ($logText -match "Desktop boot failed") {
                 throw "Hermes Desktop boot failed — see $logPath"
-            }
-            if ($logText -match "backend is ready") {
-                for ($port = 9120; $port -le 9199; $port++) {
-                    if (Test-ListeningPort -Port $port) {
-                        Write-LauncherLine "Hermes Desktop probe succeeded on port $port"
-                        return $port
-                    }
-                }
             }
         }
 
@@ -863,6 +1338,40 @@ function Start-ChatWindow {
 
     $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $command -WorkingDirectory $root -PassThru
     Write-LauncherLine "Chat window launched: PID $($process.Id)"
+}
+
+function Open-HermesBrowserSuite {
+    if ($NoOpenBrowser -or $headless) {
+        return
+    }
+    Open-DashboardBrowser -Url $webuiUrl
+    Start-Sleep -Seconds 1
+    Open-DashboardBrowser -Url $dashboardBrowserUrl
+}
+
+function Start-HermesDesktopWithProbe {
+    if ($NoOpenDesktop) {
+        return
+    }
+    # DesktopOnly explicitly requests the Electron app; do not suppress it when
+    # HERMESGO_HEADLESS is set for CI/service smoke (headless only skips browsers).
+    if ($headless -and -not $DesktopOnly) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $desktopExe)) {
+        Write-LauncherLine "Hermes Desktop skipped (not bundled): $desktopExe"
+        return
+    }
+    try {
+        $desktopProc = Start-HermesDesktopProcess
+        if ($desktopProc) {
+            Wait-HermesDesktopReady -Process $desktopProc -TimeoutSec $DesktopTimeoutSec | Out-Null
+        } else {
+            Write-LauncherLine "Hermes Desktop already running; skip readiness probe."
+        }
+    } catch {
+        Write-LauncherLine "WARNING: Hermes Desktop did not become ready: $($_.Exception.Message)"
+    }
 }
 
 function Open-DashboardBrowser {
@@ -931,32 +1440,62 @@ try {
     Apply-ProxyBypassEnvironment
     Ensure-PortableAuthFromProfile -AppRoot $root
     Ensure-PortableHomeConfig -AppRoot $root
+    Ensure-PortableDeepSeekEnvTemplate
+    Merge-PortableEnvFromKnownSources
+    Import-PortableDotEnv
+    $deepseekKey = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
+    if ([string]::IsNullOrWhiteSpace($deepseekKey)) {
+        Write-LauncherLine "WARNING: DEEPSEEK_API_KEY missing — UIs may spin on loading. Set app\home\.env or paste in http://127.0.0.1:9119/env"
+    } else {
+        Write-LauncherLine "DEEPSEEK_API_KEY loaded (len=$($deepseekKey.Length))"
+    }
+    try {
+        $agentRoot = Join-Path $root "runtime\hermes-agent"
+        $bootstrap = @"
+import sys
+sys.path.insert(0, r'$agentRoot')
+from hermes_cli.portable_bootstrap import ensure_deepseek_config_if_key, ensure_codex_config_if_authed
+if ensure_deepseek_config_if_key():
+    print('Aligned config.yaml with DeepSeek (DEEPSEEK_API_KEY)')
+elif ensure_codex_config_if_authed():
+    print('Aligned config.yaml with OpenAI Codex OAuth')
+"@
+        $bootOut = & $pythonExe -c $bootstrap 2>&1
+        foreach ($line in @($bootOut)) {
+            if ($line) { Write-LauncherLine $line }
+        }
+    } catch {
+        Write-LauncherLine "Codex config bootstrap skipped: $($_.Exception.Message)"
+    }
     Write-LauncherLine ("Portable PATH: " + $env:PATH)
     Write-LauncherLine "Portable target: standard Hermes runtime with portable Python only (no system Python on PATH)."
     Apply-CloudPreferredRouteIfAvailable
 
+    Start-GatewayProcess
+
     if ($DesktopOnly) {
-        Write-LauncherLine "Desktop-only mode: skip browser Dashboard (9119) and WebUI (8787)."
-        $desktopProc = Start-HermesDesktopProcess
-        if ($desktopProc) {
-            Wait-HermesDesktopReady -Process $desktopProc -TimeoutSec $DesktopTimeoutSec | Out-Null
-        } else {
+        Write-LauncherLine "Desktop-only mode: skip WebUI (8787); start Dashboard (9119) after gateway, then Desktop."
+        Start-DashboardProcess
+        if (-not $headless -and -not $NoOpenBrowser) {
+            Open-DashboardBrowser -Url $dashboardBrowserUrl
+        }
+        if (-not (Test-Path -LiteralPath $desktopExe)) {
             throw "Hermes Desktop executable not found at $desktopExe"
         }
+        Start-HermesDesktopWithProbe
+    } elseif ($WebUIOnly) {
+        Write-LauncherLine "WebUI-only mode: gateway, Dashboard (9119, shared auth), then WebUI (8787)."
+        Start-DashboardProcess
+        Start-WebUIProcess
+        Open-HermesBrowserSuite
     } else {
         Ensure-LocalOllamaReady
         Start-DashboardProcess
         Start-WebUIProcess
 
         if (-not $headless) {
-            if (-not $NoOpenDesktop) {
-                $null = Start-HermesDesktopProcess
-            }
-            if (-not $NoOpenBrowser) {
-                Open-DashboardBrowser -Url $webuiUrl
-                Start-Sleep -Seconds 1
-                Open-DashboardBrowser -Url $dashboardBrowserUrl
-            }
+            Open-HermesBrowserSuite
+            Start-HermesDesktopWithProbe
             if (-not $NoOpenChat) {
                 Start-ChatWindow
             }

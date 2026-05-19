@@ -255,6 +255,23 @@ def _has_any_provider_configured() -> bool:
     except Exception:
         pass
 
+    # OAuth providers (Codex, Nous, Copilot, …)
+    try:
+        from hermes_cli.auth import get_codex_auth_status
+
+        if get_codex_auth_status().get("logged_in"):
+            return True
+    except Exception:
+        pass
+
+    for oauth_id in ("openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous", "anthropic"):
+        try:
+            status = get_auth_status(oauth_id)
+            if status.get("logged_in"):
+                return True
+        except Exception:
+            pass
+
     # Check for Nous Portal OAuth credentials
     auth_file = get_hermes_home() / "auth.json"
     if auth_file.exists():
@@ -4727,6 +4744,9 @@ def cmd_profile(args):
 
 def cmd_dashboard(args):
     """Start the web UI server."""
+    from hermes_constants import ensure_portable_hermes_home_env
+
+    ensure_portable_hermes_home_env()
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401

@@ -8,13 +8,59 @@ import os
 from pathlib import Path
 
 
+def detect_portable_hermes_home() -> Path | None:
+    """Return ``app/home`` for HermesGo portable layout when HERMES_HOME is unset."""
+    override = os.environ.get("HERMES_DESKTOP_HERMES_ROOT", "").strip()
+    if override:
+        agent_root = Path(override).resolve()
+        portable_home = agent_root.parent.parent / "home"
+        if portable_home.is_dir():
+            return portable_home
+
+    try:
+        import hermes_cli
+
+        agent_root = Path(hermes_cli.__file__).resolve().parent.parent
+        portable_home = agent_root.parent.parent / "home"
+        if not portable_home.is_dir():
+            return None
+        markers = (
+            portable_home / "config.yaml",
+            portable_home / "gateway.pid",
+            portable_home / "auth.json",
+        )
+        if any(marker.exists() for marker in markers):
+            return portable_home
+    except Exception:
+        return None
+    return None
+
+
+def ensure_portable_hermes_home_env() -> Path:
+    """Set ``HERMES_HOME`` for portable HermesGo when the launcher did not export it."""
+    existing = os.environ.get("HERMES_HOME", "").strip()
+    if existing:
+        return Path(existing)
+    detected = detect_portable_hermes_home()
+    if detected is not None:
+        os.environ["HERMES_HOME"] = str(detected)
+        return detected
+    return Path.home() / ".hermes"
+
+
 def get_hermes_home() -> Path:
     """Return the Hermes home directory (default: ~/.hermes).
 
-    Reads HERMES_HOME env var, falls back to ~/.hermes.
+    Reads HERMES_HOME env var, falls back to ~/.hermes, then HermesGo ``app/home``.
     This is the single source of truth — all other copies should import this.
     """
-    return Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+    env_home = os.getenv("HERMES_HOME", "").strip()
+    if env_home:
+        return Path(env_home)
+    detected = detect_portable_hermes_home()
+    if detected is not None:
+        return detected
+    return Path.home() / ".hermes"
 
 
 def get_default_hermes_root() -> Path:

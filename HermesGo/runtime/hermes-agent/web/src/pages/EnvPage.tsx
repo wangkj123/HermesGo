@@ -20,6 +20,7 @@ import type { EnvVarInfo } from "@/lib/api";
 import { useToast } from "@/hooks/useToast";
 import { Toast } from "@/components/Toast";
 import { OAuthProvidersCard } from "@/components/OAuthProvidersCard";
+import { SetupStatusBanner } from "@/components/SetupStatusBanner";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -676,6 +677,8 @@ export default function EnvPage() {
           </div>
         </CardContent>
       </Card>
+
+      <SetupStatusBanner />
 
       {/* ═══════════════ OAuth Logins ══ */}
       <OAuthProvidersCard

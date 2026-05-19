@@ -24,7 +24,9 @@ from packaging_safe import assert_zip_has_no_reserved_entries, is_windows_reserv
 from packaging_sync import resolve_test_package_root, sync_test_package_from_zip
 OUT_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "dist")
 DT = datetime.datetime.now().strftime("%Y.%m.%d-%H%M%S")
-ZIP_NAME = f"HermesGo-{DT}-v0.14-green-3ui-slim.zip"
+VERSION = "0.14.2"
+RELEASE_TAG = f"v{VERSION}-green-3ui-slim"
+ZIP_NAME = f"HermesGo-{DT}-{RELEASE_TAG}.zip"
 ZIP_PATH = os.path.join(OUT_DIR, ZIP_NAME)
 
 # Package root: launcher entry only (matches create_hermes_go green layout).
@@ -44,6 +46,10 @@ SLIM_APP_SCRIPT_FILES = (
     "Verify-HermesGo-Retry.ps1",
     "Switch-HermesGoModel.ps1",
     "Switch-HermesGoModel.bat",
+)
+
+SLIM_DEV_SCRIPT_FILES = (
+    "check_dashboard_gateway.py",
 )
 
 SLIM_APP_TOOL_FILES = ("codex.cmd",)
@@ -180,6 +186,17 @@ def main() -> None:
                 included += 1
                 included_size += os.path.getsize(p)
 
+        for name in SLIM_DEV_SCRIPT_FILES:
+            if is_windows_reserved_name(name):
+                continue
+            p = os.path.join(SCRIPT_DIR, "scripts", name)
+            if not os.path.isfile(p):
+                continue
+            arc = f"HermesGo/app/scripts/{name}"
+            zf.write(p, arc)
+            included += 1
+            included_size += os.path.getsize(p)
+
         for name in SLIM_APP_TOOL_FILES:
             p = os.path.join(SCRIPT_DIR, name)
             if not os.path.isfile(p):
@@ -236,7 +253,7 @@ def main() -> None:
             "Cloud API keys (e.g. DeepSeek) work as in the full package. "
             "For local Gemma/Ollama, install Ollama separately or add models under "
             "`app/data/ollama/models`.\n\n"
-            "v0.14.0: includes Hermes Kanban backend (`hermes_cli.kanban_db`) for WebUI board.\n"
+            "v0.14.2: includes Desktop remote binding to Dashboard/gateway plus WebUI board backend.\n"
             "Optional: `runtime/hermes-desktop/` (portable Electron, run `HermesDesktop.bat`).\n"
             "Package root keeps only `HermesGo.exe`, `README.txt`, and the three `.bat` launchers;\n"
             "scripts, tools, assets, and runtime live under `app/`.\n"
@@ -257,13 +274,6 @@ def main() -> None:
     print(f"Files: {included}, raw ~{included_size / 1024 / 1024:.1f} MB")
     print(f"ZIP: {zsize / 1024 / 1024:.1f} MB")
     print(f"Done: {ZIP_PATH}")
-
-    desktop = r"C:\Users\Administrator\Desktop"
-    try:
-        shutil.copy2(ZIP_PATH, os.path.join(desktop, ZIP_NAME))
-        print(f"Desktop: {os.path.join(desktop, ZIP_NAME)}")
-    except OSError as e:
-        print(f"Desktop copy skipped: {e}")
 
     if os.environ.get("HERMESGO_SKIP_TEST_SYNC", "").strip().lower() in ("1", "true", "yes"):
         print("Test sync skipped (HERMESGO_SKIP_TEST_SYNC)")

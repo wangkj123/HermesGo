@@ -235,7 +235,7 @@ export const zh: Translations = {
     replaceCurrentValue: "替换当前值（{preview}）",
     showValue: "显示实际值",
     hideValue: "隐藏值",
-    quickTitle: "快速配置（免翻墙）",
+    quickTitle: "快速配置（国内可达）",
     quickDesc: "选择国内可直连的提供商，粘贴一次密钥，HermesGo 会自动保存并做连通性测试。",
     quickPasteKey: "粘贴 {provider} API Key",
     quickPlaceholder: "在此粘贴 API Key…",

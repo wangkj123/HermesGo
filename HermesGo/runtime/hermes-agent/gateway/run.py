@@ -9548,13 +9548,17 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    from hermes_constants import ensure_portable_hermes_home_env
+
+    ensure_portable_hermes_home_env()
+
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same HERMES_HOME.
     # The PID file is scoped to HERMES_HOME, so future multi-profile
     # setups (each profile using a distinct HERMES_HOME) will naturally
     # allow concurrent instances without tripping this guard.
     import time as _time
-    from gateway.status import get_running_pid, remove_pid_file, terminate_pid
+    from gateway.status import get_running_pid, remove_pid_file, terminate_pid, _pid_is_alive
     existing_pid = get_running_pid()
     if existing_pid is not None and existing_pid != os.getpid():
         if replace:
@@ -9574,11 +9578,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 return False
             # Wait up to 10 seconds for the old process to exit
             for _ in range(20):
-                try:
-                    os.kill(existing_pid, 0)
-                    _time.sleep(0.5)
-                except (ProcessLookupError, PermissionError):
-                    break  # Process is gone
+                if not _pid_is_alive(existing_pid):
+                    break
+                _time.sleep(0.5)
             else:
                 # Still alive after 10s — force kill
                 logger.warning(

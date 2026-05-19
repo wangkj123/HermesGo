@@ -3389,9 +3389,7 @@ def _update_config_for_provider(
     # valid for the new provider.  An OpenRouter-formatted name like
     # "anthropic/claude-opus-4.6" will fail on direct-API providers.
     if default_model:
-        cur_default = model_cfg.get("default", "")
-        if not cur_default or "/" in cur_default:
-            model_cfg["default"] = default_model
+        model_cfg["default"] = default_model
 
     config["model"] = model_cfg
 

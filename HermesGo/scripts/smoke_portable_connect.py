@@ -104,8 +104,16 @@ def main() -> int:
     from hermes_cli.config import load_config
 
     cfg = load_config()
-    provider = str(cfg.get("model", {}).get("provider", "") or "").strip()
-    model = str(cfg.get("model", {}).get("default", "") or "").strip()
+    model_cfg = cfg.get("model")
+    if isinstance(model_cfg, dict):
+        provider = str(model_cfg.get("provider") or "").strip()
+        model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+    elif isinstance(model_cfg, str):
+        provider = ""
+        model = model_cfg.strip()
+    else:
+        provider = ""
+        model = ""
     print(f"config provider={provider} model={model}")
 
     try:

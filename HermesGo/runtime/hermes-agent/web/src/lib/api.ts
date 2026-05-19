@@ -36,6 +36,7 @@ async function getSessionToken(): Promise<string> {
 
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getSetupStatus: () => fetchJSON<SetupStatusResponse>("/api/setup/status"),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
   getSessionMessages: (id: string) =>
@@ -254,6 +255,22 @@ export interface PlatformStatus {
   error_message?: string;
   state: string;
   updated_at: string;
+}
+
+export interface SetupStatusResponse {
+  setup_state: "ready" | "needs_provider" | "provider_incomplete";
+  configured: boolean;
+  runtime_ready: boolean;
+  chat_ready: boolean;
+  provider: string | null;
+  model: string | null;
+  base_url: string | null;
+  hermes_home: string;
+  message: string;
+  message_en: string;
+  runtime_error: string | null;
+  codex_connected: boolean;
+  auth: Record<string, { logged_in: boolean; error?: string | null }>;
 }
 
 export interface StatusResponse {

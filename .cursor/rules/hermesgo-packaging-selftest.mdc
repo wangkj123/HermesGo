@@ -23,6 +23,8 @@ alwaysApply: false
 | Agent 终端命令 | `git` / `py` / `cmd` 裸调用 | 全路径：`Git\cmd\git.exe`、包内 `python.exe`、上述 `powershell.exe` |
 | 自测运行环境 | WSL 里测 COM/便携包 | **Windows 本机** Shell + 包内 Python 绝对路径 |
 | zip 根目录 | 散落 scripts/tools | 仅 `HermesGo.exe`、`README.txt`、三个 `.bat`；其余在 `app/` |
+| 产物位置 | `build_zip_slim.py` 复制 zip 到桌面 | 只输出 `dist/`；测试树用 `packaging_sync` 同步，**不要**拷到 Desktop |
+| dist 清理 | 保留每次构建的全部历史 zip | 只保留**最新一份** slim zip + `README.txt`，旧包删除 |
 | Windows 保留名 | zip 含 `nul` 等 | `packaging_safe.py` 跳过/校验；启动时 `Remove-WindowsReservedArtifacts` |
 
 ## 已记录教训（按时间追加）
@@ -73,10 +75,40 @@ alwaysApply: false
 - **错误做法**：只改 git 树不跑 sync
 - **正确做法**：`build_zip_slim.py` 结束后 `packaging_sync.sync_test_package_from_zip`；自测前可设 `HERMESGO_TEST_APP_ROOT` 指向 `...\HermesGo\app`
 
+### 2026-05-18 — Windows 启动顺序：先 gateway 再 Desktop/Dashboard
+- **现象**：Dashboard 状态页显示 Gateway 未运行；Desktop 无法正常使用
+- **错误做法**：`-DesktopOnly` 只起 Desktop；Windows 上 `hermes gateway start` 不支持（会报 Not supported）
+- **正确做法**：`Start-HermesGo.ps1` 先 `Start-GatewayProcess`（`python -m hermes_cli.main gateway run --replace --quiet` 后台）；再起 Dashboard 9119，最后 Desktop；`gateway/status.py` 在 Windows 用 `OpenProcess` 检活、路径用 `/` 规范化识别 `hermes_cli\main.py gateway`
+
+### 2026-05-19 — WebUI 显示 Gateway not running / 未连接
+- **现象**：8787 WebUI 横幅或 Gateway 卡片显示未运行；Dashboard 9119 却显示 RUNNING
+- **错误做法**：`HermesWebUI.bat` 只 `python run.py` 不起 gateway；或 WebUI 进程未继承 `HERMES_HOME=app/home`
+- **正确做法**：`HermesWebUI.bat` → `Start-HermesGo.ps1 -WebUIOnly`（先 gateway 再 8787）；`Start-WebUIProcess` 显式 `HERMES_HOME` 并轮询 `/api/health/agent`；`agent_health._gateway_root_pid_path()` 用 `get_hermes_home()`
+- **涉及文件**：`HermesWebUI.bat`、`Start-HermesGo.ps1`、`hermes-webui/run.py`、`hermes-webui/api/agent_health.py`
+
+### 2026-05-19 — Desktop 报找不到网关但 Dashboard 显示 Gateway 运行
+- **现象**：9119 状态页 Gateway RUNNING；Desktop 提示「找不到网关 / gateway not connected」
+- **错误做法**：只修 9119 Dashboard；或假定 Desktop 与浏览器共用同一 `HERMES_HOME`
+- **正确做法**：便携包网关 PID 在 `app/home/gateway.pid`；Desktop 子进程未继承 `HERMES_HOME` 时会查 `~/.hermes`；`hermes_constants.detect_portable_hermes_home()` + `cmd_dashboard` 调用 `ensure_portable_hermes_home_env()`；启动器给 Desktop 传 `HERMES_HOME` 与 `HERMES_DASHBOARD_TUI=1`；网关进程显式带 `HERMES_HOME` 启动
+- **涉及文件**：`hermes_constants.py`、`hermes_cli/main.py`、`Start-HermesGo.ps1`
+
+### 2026-05-19 — HermesGo.exe 自动更新 v0.14.2 失败
+- **现象**：启动器提示发现 `v0.14.2-green-3ui-slim`，点更新后报「网络探测失败」或「文件正由另一进程使用」（如 `hermes-desktop\chrome_100_percent.pak`）
+- **错误做法**：对 `releases/download/...zip` 做 4s HEAD 探测失败后直接中止；Desktop/Gateway 未关就覆盖 `app/runtime`
+- **正确做法**：`HermesGoBootstrap.cs` 在已成功拉取 GitHub releases API 后跳过重复网络探测；镜像源（`ghfast.top`）优先；下载超时默认 180s；覆盖前 `StopPortableHermesProcessesBeforeUpdate()`；改后重编 `HermesGo\scripts\Compile-HermesGoBootstrap.ps1` 并替换包根 `HermesGo.exe`
+- **涉及文件**：`create_hermes_go/HermesGoBootstrap.cs`、`HermesGo/HermesGo.exe`
+
+### 2026-05-18 — Desktop 网关 WebSocket 未启用
+- **现象**：`backend is ready`、9120 HTTP 200，但 Desktop 仍卡在 onboarding「No inference provider is configured」；日志有 `embedded_chat_disabled` / WS close **4403**
+- **错误做法**：只给 `dashboard` 加 `--tui` CLI 参数，不补 `web_server` 的 `/api/ws` 与 `embedded_chat=True`
+- **正确做法**：`runtime/hermes-agent/hermes_cli/web_server.py` 需 `_DASHBOARD_EMBEDDED_CHAT_ENABLED`、`@app.websocket("/api/ws")` → `tui_gateway.ws.handle_ws`；`cmd_dashboard` 在 `HERMES_DASHBOARD_TUI=1` 或 `--tui` 时 `start_server(..., embedded_chat=True)`；打包须含完整 `tui_gateway/` 包
+- **Codex 仅登录**：`setup.status` 可为 true 但 `setup.runtime_check` / UI 仍提示未选模型 → `Ensure-PortableAuthFromProfile` 后跑 `hermes_cli/portable_bootstrap.ensure_codex_config_if_authed()`（slim 默认 deepseek 时自动写 `openai-codex`）
+
 ## 自测命令（Windows）
 
 ```powershell
 $env:HERMESGO_HEADLESS = "1"
+$env:HERMESGO_ALLOW_HEADLESS = "1"
 $env:HERMESGO_LAUNCH = "dashboard,webui"
 E:\AI\hermes\HermesGo-slim-test-v014\HermesGo\HermesGo.bat
 
@@ -85,3 +117,78 @@ E:\AI\hermes\HermesGo\runtime\python311\python.exe E:\AI\hermes\HermesGo\scripts
 ```
 
 一键：`HermesGo\scripts\run_portable_selftest.ps1`
+
+Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`（**remote 模式**连 9119：日志 `Remote Hermes backend is ready`；勿再要求 9120+ 监听）
+
+### 2026-05-19 — Desktop 不能用：embedded_chat 关 + Codex 配额耗尽
+- **现象**：`desktop.log` 显示 remote ready，但 UI 仍 onboarding；`errors.log` 有 `embedded_chat_disabled` close **4403**；Codex `429 usage limit`
+- **错误做法**：9119 Dashboard 不带 `--tui`/`HERMES_DASHBOARD_TUI`；有 Codex OAuth 时 `ensure_codex_config_if_authed` 强行改回 openai-codex
+- **正确做法**：`Start-DashboardProcess` 加 `--tui` + `HERMES_DASHBOARD_TUI=1`；`ensure_deepseek_config_if_key` 优先于 Codex；Codex exhausted 时改 deepseek；密钥写 `app/home/.env` 的 `DEEPSEEK_API_KEY`
+- **涉及文件**：`Start-HermesGo.ps1`、`hermes_cli/portable_bootstrap.py`
+
+### 2026-05-19 — 默认启动须开 8787+9119 浏览器并起 Desktop
+- **现象**：双击 `HermesGo.exe` 只起服务、不开浏览器；或 Desktop 探测失败导致两个浏览器都不开
+- **错误做法**：仅设 `HERMESGO_HEADLESS=1` 做自测后用户环境继承；先等 Desktop 再开浏览器（Desktop 抛错则浏览器跳过）
+- **正确做法**：全量模式先 `Open-HermesBrowserSuite`（8787 + 9119/env）再 `Start-HermesDesktopWithProbe`；headless 须 **同时** `HERMESGO_HEADLESS=1` 与 `HERMESGO_ALLOW_HEADLESS=1`
+- **涉及文件**：`Start-HermesGo.ps1`、`scripts/run_portable_selftest.ps1`
+
+### 2026-05-19 — 三件套以 Dashboard 9119 为唯一登录/配置源
+- **现象**：Dashboard 已登录、Gateway RUNNING；Desktop 仍 onboarding/找不到网关；WebUI 要再走一遍向导
+- **错误做法**：Desktop 自启 9120 嵌入式 dashboard（另一套 session）；各 UI 各自配 provider
+- **正确做法**：`Start-HermesDesktopProcess` 在 9119 就绪后从 `/env?quick=1` 取 `__HERMES_SESSION_TOKEN__`，设 `HERMES_DESKTOP_REMOTE_URL` + `HERMES_DESKTOP_REMOTE_TOKEN`；WebUI 用同一 `HERMES_HOME` + `-WebUIOnly` 也先起 9119；探测 Desktop 就绪看 `Remote Hermes backend is ready`
+- **涉及文件**：`Start-HermesGo.ps1`
+
+### 2026-05-19 — Codex/Node 环境会让 Desktop 0 码秒退
+- **现象**：`Hermes.exe` 启动后立即退出，`Start-HermesGo.ps1` 报 `Hermes Desktop exited before ready (code 0)`，且没有 `app/home/logs/desktop.log`
+- **错误做法**：让 Desktop 继承 Agent/Codex shell 里的 `ELECTRON_RUN_AS_NODE=1`
+- **正确做法**：`Start-ProcessWithEnvironment` 支持移除环境变量；启动 Desktop 时显式清除 `ELECTRON_RUN_AS_NODE`
+- **涉及文件**：`Start-HermesGo.ps1`
+
+### 2026-05-19 — Desktop remote 冒烟不要再要求 9120
+- **现象**：Desktop 已通过 9119 remote backend 就绪，但 `smoke_portable_desktop.py` 仍报 `FAIL no listener 9120-9199 after bat`
+- **错误做法**：把 9120-9199 本地嵌入式 dashboard 当成唯一成功条件
+- **正确做法**：remote 模式以 `desktop.log` 的 `Remote Hermes backend is ready` 或 9119 Dashboard HTTP + Desktop 进程作为成功条件；本地模式才检查 9120-9199
+- **涉及文件**：`scripts/smoke_portable_desktop.py`
+
+### 2026-05-19 — Codex 自动对齐必须同时修 provider 和 model
+- **现象**：`auth.json` 已登录 Codex，启动后 `provider: openai-codex` 但 `model.default` 仍是 `deepseek-v4-flash`
+- **错误做法**：只切 provider/base_url，或 `_update_config_for_provider(default_model=...)` 在已有 model 时不覆盖
+- **正确做法**：传入 `default_model` 时必须写入该模型；`portable_bootstrap.ensure_codex_config_if_authed()` 还要纠正已存在的 `openai-codex + 非 Codex model` 坏配置
+- **涉及文件**：`runtime/hermes-agent/hermes_cli/auth.py`、`runtime/hermes-agent/hermes_cli/portable_bootstrap.py`
+
+### 2026-05-19 — Desktop 找不到 gateway 的根因闭环
+
+- **现象**：3UI 启动时 Dashboard HTTP 已起来，但 Desktop 提示后端/gateway 不可用，或启动日志里先出现 `Desktop boot failed` 后又出现 `Remote Hermes backend is ready`，导致探测误判。
+- **根因**：
+  1. `Start-HermesGo.ps1` 只看到已有 `Hermes.exe` 就跳过，可能复用旧环境启动的 Desktop，没有绑定当前便携 `HERMES_HOME`、Dashboard URL 与 session token。
+  2. `desktop.log` 没有在重新启动 Desktop 前清理，历史失败行会让 readiness probe 误判。
+  3. 打包脚本未把 `scripts/check_dashboard_gateway.py` 放进 `app/scripts/`，一旦启动脚本依赖 Dashboard API `gateway_running=true`，绿色包里会永远判 false。
+- **修复**：
+  - 发现同包 `Hermes.exe` 已运行时，先重启再注入 `HERMES_DESKTOP_REMOTE_URL` / `HERMES_DESKTOP_REMOTE_TOKEN` / 便携 `HERMES_HOME`。
+  - 启动 Desktop 前删除 `app/home/logs/desktop.log`，并让 probe 优先识别 `Remote Hermes backend is ready`。
+  - `build_zip_slim.py` 必须把 `check_dashboard_gateway.py` 打入 `HermesGo/app/scripts/`。
+- **回归**：从 `HermesGo-slim-test-v014\HermesGo` 冷启动 `HermesGo.bat -NoOpenBrowser -NoOpenChat`，必须看到 `Dashboard reports gateway_running=true`、`WebUI probe succeeded`、`Hermes Desktop probe succeeded (remote backend on 9119)`；再跑 `smoke_portable_connect.py` 与 `smoke_portable_desktop.py`。
+
+### 2026-05-19 — Desktop WS hello 失败（async_utils + target_model）
+- **现象**：CLI/Dashboard/WebUI hello 正常，Desktop 发 hello 无回复或 WS 秒断（`ConnectionClosedOK 1000`）；`agent.log` 有 `No module named 'agent.async_utils'` 或 `agent init failed: resolve_runtime_provider() got an unexpected keyword argument 'target_model'`
+- **错误做法**：只改 smoke 脚本事件名、不补缺失模块；或保留 `resolve_runtime_provider(..., target_model=...)`
+- **正确做法**：新增 `runtime/hermes-agent/agent/async_utils.py`（`safe_schedule_threadsafe`）；`tui_gateway/server.py` 的 `_make_agent` 只传 `requested=`；`smoke_hello_all_ui.py` 识别 `message.delta`/`message.complete`；全量回归：`HERMESGO_TEST_APP_ROOT=...\app` + `smoke_hello_all_ui.py` 四路 ALL passed
+- **涉及文件**：`agent/async_utils.py`、`tui_gateway/ws.py`、`tui_gateway/server.py`、`scripts/smoke_hello_all_ui.py`
+
+### 2026-05-19 — Desktop remote API 401（鉴权头不一致）
+- **现象**：`HERMES_DESKTOP_REMOTE_*` 已注入、`desktop.log` 有 `Remote Hermes backend is ready`，但 Electron 控制台/`hermes:api` 大量 `401 Unauthorized`；OAuth/Keys 一直转圈或 onboarding 无法完成
+- **错误做法**：只让 Dashboard SPA 认 `Authorization: Bearer`；或改 Desktop 去发 Bearer 而不修服务端
+- **正确做法**：`web_server.py` 恢复双通道鉴权：`_SESSION_HEADER_NAME = X-Hermes-Session-Token`（Desktop `main.cjs`）+ `Authorization: Bearer`（浏览器 Dashboard）；`_has_valid_session_token()` 供 middleware 与 `_require_token` 共用
+- **涉及文件**：`runtime/hermes-agent/hermes_cli/web_server.py`
+
+### 2026-05-19 — DesktopOnly 在 headless 下不启动 Hermes.exe
+- **现象**：`HermesDesktop.bat` / `smoke_portable_desktop.py` exit 0 但无 `desktop.log`、`FAIL desktop readiness`；debug 无 `Hermes Desktop started`
+- **错误做法**：`Start-HermesDesktopWithProbe` 在 `$headless` 时直接 return（即使用 `-DesktopOnly`）
+- **正确做法**：仅当 `$headless -and -not $DesktopOnly` 时跳过 Desktop；`smoke_portable_desktop.py` 运行 bat 前 `pop HERMESGO_HEADLESS/ALLOW_HEADLESS`
+- **涉及文件**：`Start-HermesGo.ps1`、`scripts/smoke_portable_desktop.py`
+
+### 2026-05-19 — Desktop 日志 API file=gui 400
+- **现象**：Desktop 设置/日志页 `hermes:api` 报 `Unknown log file: gui`
+- **错误做法**：只登记 agent/errors/gateway，不映射 Desktop 请求的 `gui`
+- **正确做法**：`hermes_cli/logs.py` 的 `LOG_FILES` 增加 `"gui"`/`"desktop"` → `desktop.log`
+- **涉及文件**：`runtime/hermes-agent/hermes_cli/logs.py`

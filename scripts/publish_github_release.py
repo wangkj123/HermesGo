@@ -58,11 +58,14 @@ def main() -> int:
     body = """## HermesGo v0.14.2 green portable (three UIs)
 
 ### Fixes in this build
-- **Hermes Desktop**: bundled CLI accepts `dashboard --tui` (fixes “cannot enter” / boot loop)
-- `HermesDesktop.bat`: `start /D runtime\\hermes-desktop` for correct Electron cwd
+- **Unified login**: Desktop remote mode uses Dashboard 9119 session token (`HERMES_DESKTOP_REMOTE_*`)
+- **Desktop API auth**: server accepts `X-Hermes-Session-Token` (Desktop) and `Authorization: Bearer` (browser)
+- **DesktopOnly + headless**: `-DesktopOnly` always launches Hermes.exe (CI headless no longer skips Desktop)
+- **Desktop logs**: `/api/logs?file=gui` maps to `desktop.log`
+- **HermesDesktop.bat**: runs `Start-HermesGo.ps1 -DesktopOnly` (portable auth/config, gateway + Dashboard first)
 - Codex provider test: no bogus `/v1/models` probe on `codex_responses`
 - First-run `auth.json` import from `%USERPROFILE%\\.hermes` when portable home is empty
-- Self-test: `smoke_portable_connect.py`, `smoke_portable_desktop.py`, `run_portable_selftest.ps1`
+- Self-test: `smoke_portable_connect.py`, `smoke_portable_desktop.py`, `smoke_hello_all_ui.py`
 
 ### UIs
 - **HermesGo.exe** / **HermesGo.bat** — Dashboard + WebUI; optional `--menu`; auto-update from this repo

@@ -110,6 +110,7 @@ internal sealed class HermesBootstrap
     private readonly HashSet<int> _launchedProcessIds = new HashSet<int>();
     private readonly object _launchedProcessLock = new object();
     private bool _shutdownRequested;
+    private bool _githubReleasesReachable;
 
     public HermesBootstrap(string root, string[] args)
     {
@@ -548,6 +549,19 @@ internal sealed class HermesBootstrap
         {
             var tag = overrideValue.Trim();
             Log("target release override: " + tag);
+            var releasesFromApi = await FetchReleasesFromGitHubApiAsync().ConfigureAwait(false);
+            if (releasesFromApi != null)
+            {
+                var matched = releasesFromApi.FirstOrDefault(
+                    release => release != null &&
+                               string.Equals(release.TagName, tag, StringComparison.OrdinalIgnoreCase));
+                if (matched != null)
+                {
+                    Log("target release override matched GitHub release assets");
+                    return new List<ReleaseInfo> { matched };
+                }
+            }
+
             return new List<ReleaseInfo>
             {
                 new ReleaseInfo
@@ -563,92 +577,10 @@ internal sealed class HermesBootstrap
         string probeFailure = null;
         try
         {
-            using (var client = CreateHttpClient())
+            var releases = await FetchReleasesFromGitHubApiAsync().ConfigureAwait(false);
+            if (releases != null)
             {
-                var request = new HttpRequestMessage(HttpMethod.Get, string.Format("https://api.github.com/repos/{0}/releases?per_page=10", Repo));
-                request.Headers.UserAgent.ParseAdd("HermesGoBootstrap/1.0");
-                request.Headers.Accept.ParseAdd("application/vnd.github+json");
-                request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
-
-                using (var response = await client.SendAsync(request).ConfigureAwait(false))
-                {
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        throw new InvalidOperationException("HermesGo release list probe failed: " + response.StatusCode);
-                    }
-
-                    var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    var serializer = new JavaScriptSerializer();
-                    var payload = serializer.DeserializeObject(json) as object[];
-                    if (payload == null)
-                    {
-                        throw new InvalidOperationException("HermesGo release list payload was not an array");
-                    }
-
-                    var releases = new List<ReleaseInfo>();
-                    foreach (var item in payload)
-                    {
-                        var releasePayload = item as Dictionary<string, object>;
-                        if (releasePayload == null || !releasePayload.ContainsKey("tag_name"))
-                        {
-                            continue;
-                        }
-
-                        bool isDraft = releasePayload.ContainsKey("draft") && Convert.ToBoolean(releasePayload["draft"], CultureInfo.InvariantCulture);
-                        bool isPrerelease = releasePayload.ContainsKey("prerelease") && Convert.ToBoolean(releasePayload["prerelease"], CultureInfo.InvariantCulture);
-                        if (isDraft || isPrerelease)
-                        {
-                            continue;
-                        }
-
-                        var release = new ReleaseInfo
-                        {
-                            TagName = Convert.ToString(releasePayload["tag_name"], CultureInfo.InvariantCulture),
-                            DisplayName = releasePayload.ContainsKey("name") ? Convert.ToString(releasePayload["name"], CultureInfo.InvariantCulture) : string.Empty,
-                            Body = releasePayload.ContainsKey("body") ? Convert.ToString(releasePayload["body"], CultureInfo.InvariantCulture) : string.Empty,
-                            SourceZipUrl = releasePayload.ContainsKey("zipball_url") ? Convert.ToString(releasePayload["zipball_url"], CultureInfo.InvariantCulture) : string.Empty,
-                            ZipAssetNames = new List<string>(),
-                            ZipAssetUrls = new List<string>(),
-                        };
-                        release.AgentVersion = ParseAgentVersion(release.DisplayName, release.Body, release.TagName);
-
-                        object assetsValue;
-                        if (releasePayload.TryGetValue("assets", out assetsValue))
-                        {
-                            var assets = assetsValue as object[];
-                            if (assets != null)
-                            {
-                                foreach (var assetValue in assets)
-                                {
-                                    var asset = assetValue as Dictionary<string, object>;
-                                    if (asset == null)
-                                    {
-                                        continue;
-                                    }
-
-                                    var name = asset.ContainsKey("name") ? Convert.ToString(asset["name"], CultureInfo.InvariantCulture) : string.Empty;
-                                    var url = asset.ContainsKey("browser_download_url") ? Convert.ToString(asset["browser_download_url"], CultureInfo.InvariantCulture) : string.Empty;
-                                    if (string.IsNullOrWhiteSpace(name) || !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        continue;
-                                    }
-
-                                    release.ZipAssetNames.Add(name);
-                                    if (!string.IsNullOrWhiteSpace(url))
-                                    {
-                                        release.ZipAssetUrls.Add(url);
-                                    }
-                                }
-                            }
-                        }
-
-                        releases.Add(release);
-                    }
-
-                    NormalizeAndSortReleases(releases);
-                    Log("Hermes release list from GitHub: " + releases.Count);
-                    return releases;
-                }
+                return releases;
             }
         }
         catch (Exception ex)
@@ -667,6 +599,98 @@ internal sealed class HermesBootstrap
         }
 
         return null;
+    }
+
+    private async Task<List<ReleaseInfo>> FetchReleasesFromGitHubApiAsync()
+    {
+        using (var client = CreateHttpClient())
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, string.Format("https://api.github.com/repos/{0}/releases?per_page=10", Repo));
+            request.Headers.UserAgent.ParseAdd("HermesGoBootstrap/1.0");
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
+
+            using (var response = await client.SendAsync(request).ConfigureAwait(false))
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new InvalidOperationException("HermesGo release list probe failed: " + response.StatusCode);
+                }
+
+                var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var serializer = new JavaScriptSerializer();
+                var payload = serializer.DeserializeObject(json) as object[];
+                if (payload == null)
+                {
+                    throw new InvalidOperationException("HermesGo release list payload was not an array");
+                }
+
+                var releases = new List<ReleaseInfo>();
+                foreach (var item in payload)
+                {
+                    var releasePayload = item as Dictionary<string, object>;
+                    if (releasePayload == null || !releasePayload.ContainsKey("tag_name"))
+                    {
+                        continue;
+                    }
+
+                    bool isDraft = releasePayload.ContainsKey("draft") && Convert.ToBoolean(releasePayload["draft"], CultureInfo.InvariantCulture);
+                    bool isPrerelease = releasePayload.ContainsKey("prerelease") && Convert.ToBoolean(releasePayload["prerelease"], CultureInfo.InvariantCulture);
+                    if (isDraft || isPrerelease)
+                    {
+                        continue;
+                    }
+
+                    var release = new ReleaseInfo
+                    {
+                        TagName = Convert.ToString(releasePayload["tag_name"], CultureInfo.InvariantCulture),
+                        DisplayName = releasePayload.ContainsKey("name") ? Convert.ToString(releasePayload["name"], CultureInfo.InvariantCulture) : string.Empty,
+                        Body = releasePayload.ContainsKey("body") ? Convert.ToString(releasePayload["body"], CultureInfo.InvariantCulture) : string.Empty,
+                        SourceZipUrl = releasePayload.ContainsKey("zipball_url") ? Convert.ToString(releasePayload["zipball_url"], CultureInfo.InvariantCulture) : string.Empty,
+                        ZipAssetNames = new List<string>(),
+                        ZipAssetUrls = new List<string>(),
+                    };
+                    release.AgentVersion = ParseAgentVersion(release.DisplayName, release.Body, release.TagName);
+
+                    object assetsValue;
+                    if (releasePayload.TryGetValue("assets", out assetsValue))
+                    {
+                        var assets = assetsValue as object[];
+                        if (assets != null)
+                        {
+                            foreach (var assetValue in assets)
+                            {
+                                var asset = assetValue as Dictionary<string, object>;
+                                if (asset == null)
+                                {
+                                    continue;
+                                }
+
+                                var name = asset.ContainsKey("name") ? Convert.ToString(asset["name"], CultureInfo.InvariantCulture) : string.Empty;
+                                var url = asset.ContainsKey("browser_download_url") ? Convert.ToString(asset["browser_download_url"], CultureInfo.InvariantCulture) : string.Empty;
+                                if (string.IsNullOrWhiteSpace(name) || !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    continue;
+                                }
+
+                                release.ZipAssetNames.Add(name);
+                                if (!string.IsNullOrWhiteSpace(url))
+                                {
+                                    release.ZipAssetUrls.Add(url);
+                                }
+                            }
+                        }
+                    }
+
+                    releases.Add(release);
+                }
+
+                NormalizeAndSortReleases(releases);
+                _githubReleasesReachable = releases.Count > 0;
+                Log("Hermes release list from GitHub: " + releases.Count);
+                return releases;
+            }
+        }
     }
 
     private async Task<List<ReleaseInfo>> ResolveTargetReleasesFromAtomAsync()
@@ -718,6 +742,7 @@ internal sealed class HermesBootstrap
                         releases.Add(release);
                     }
 
+                    _githubReleasesReachable = releases.Count > 0;
                     Log("Hermes release list from GitHub Atom: " + releases.Count);
                     return releases;
                 }
@@ -823,6 +848,8 @@ internal sealed class HermesBootstrap
             return UpdateResult.Failed("下载的 HermesGo 便携包结构校验失败，未覆盖当前文件。");
         }
 
+        ReportUpdateProgress(progressReporter, "正在停止 Hermes 相关进程...");
+        StopPortableHermesProcessesBeforeUpdate();
         ReportUpdateProgress(progressReporter, "正在覆盖 HermesGo 便携包文件...");
         ApplyUpdate(extractedRoot);
         ReportUpdateProgress(progressReporter, "正在清理临时文件...");
@@ -876,6 +903,8 @@ internal sealed class HermesBootstrap
                 candidates.Add(new UpdateSource(url, "github-asset-api"));
             }
         }
+
+        AppendMirrorSources(candidates);
 
         Log("default update sources: " + candidates.Count);
         return candidates;
@@ -973,6 +1002,55 @@ internal sealed class HermesBootstrap
         return score;
     }
 
+    private static void AppendMirrorSources(List<UpdateSource> candidates)
+    {
+        if (candidates == null || candidates.Count == 0)
+        {
+            return;
+        }
+
+        var mirrorPrefixes = new[]
+        {
+            "https://ghfast.top/",
+            "https://mirror.ghproxy.com/",
+        };
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in candidates)
+        {
+            if (source != null && !string.IsNullOrWhiteSpace(source.Raw))
+            {
+                existing.Add(source.Raw);
+            }
+        }
+
+        var mirrorInsertIndex = 0;
+        foreach (var source in candidates.ToList())
+        {
+            if (source == null || string.IsNullOrWhiteSpace(source.Raw))
+            {
+                continue;
+            }
+
+            var raw = source.Raw.Trim();
+            if (!raw.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            for (var index = mirrorPrefixes.Length - 1; index >= 0; index--)
+            {
+                var mirrored = mirrorPrefixes[index] + raw;
+                if (existing.Add(mirrored))
+                {
+                    candidates.Insert(
+                        mirrorInsertIndex,
+                        new UpdateSource(mirrored, source.Label + "-mirror" + (index + 1).ToString(CultureInfo.InvariantCulture)));
+                    mirrorInsertIndex++;
+                }
+            }
+        }
+    }
+
     private bool ContainsHttpSources(IEnumerable<UpdateSource> sources)
     {
         return sources.Any(s => s.Uri.Scheme == Uri.UriSchemeHttp || s.Uri.Scheme == Uri.UriSchemeHttps);
@@ -985,45 +1063,112 @@ internal sealed class HermesBootstrap
 
     private async Task<bool> HasNetworkAsync(IReadOnlyCollection<UpdateSource> sources)
     {
+        if (ReadBoolEnv("HERMESGO_SKIP_NETWORK_PROBE", defaultValue: false))
+        {
+            Log("network probe skipped via HERMESGO_SKIP_NETWORK_PROBE");
+            return true;
+        }
+
+        if (_githubReleasesReachable)
+        {
+            Log("network probe skipped: GitHub releases API already reachable");
+            return true;
+        }
+
         var firstHttp = sources.FirstOrDefault(s => s.Uri.Scheme == Uri.UriSchemeHttp || s.Uri.Scheme == Uri.UriSchemeHttps);
         if (firstHttp == null)
         {
             return true;
         }
 
+        var probeTargets = new List<Uri>();
+        probeTargets.Add(new Uri(string.Format("https://api.github.com/repos/{0}", Repo)));
+        if (!probeTargets.Any(uri => string.Equals(uri.Host, firstHttp.Uri.Host, StringComparison.OrdinalIgnoreCase)))
+        {
+            probeTargets.Add(firstHttp.Uri);
+        }
+
+        var probeSeconds = ReadIntEnv("HERMESGO_NETWORK_PROBE_SEC", 12);
+        foreach (var probeUri in probeTargets)
+        {
+            if (await ProbeNetworkEndpointAsync(probeUri, probeSeconds, useProxy: false).ConfigureAwait(false))
+            {
+                return true;
+            }
+
+            if (ReadBoolEnv(UseProxyEnv, defaultValue: false))
+            {
+                if (await ProbeNetworkEndpointAsync(probeUri, probeSeconds, useProxy: true).ConfigureAwait(false))
+                {
+                    return true;
+                }
+            }
+        }
+
+        Log("network probe failed for all targets");
+        return false;
+    }
+
+    private async Task<bool> ProbeNetworkEndpointAsync(Uri probeUri, int probeSeconds, bool useProxy)
+    {
         try
         {
-            using (var client = CreateHttpClient())
-            using (var request = new HttpRequestMessage(HttpMethod.Head, firstHttp.Uri))
-            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4)))
+            using (var client = CreateHttpClient(useProxy))
             {
-                request.Headers.UserAgent.ParseAdd("HermesGoBootstrap/1.0");
-                using (var response = await client.SendAsync(request, cts.Token).ConfigureAwait(false))
+                var method = string.Equals(probeUri.Host, "api.github.com", StringComparison.OrdinalIgnoreCase)
+                    ? HttpMethod.Head
+                    : HttpMethod.Get;
+                using (var request = new HttpRequestMessage(method, probeUri))
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(4, probeSeconds))))
                 {
-                    Log("network probe ok: " + firstHttp.Label + " -> " + (int)response.StatusCode);
-                    return true;
+                    request.Headers.UserAgent.ParseAdd("HermesGoBootstrap/1.0");
+                    if (method == HttpMethod.Get)
+                    {
+                        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
+                    }
+
+                    using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false))
+                    {
+                        Log("network probe ok"
+                            + (useProxy ? " (proxy)" : string.Empty)
+                            + ": "
+                            + probeUri.Host
+                            + " -> "
+                            + (int)response.StatusCode);
+                        return response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.PartialContent;
+                    }
                 }
             }
         }
         catch (Exception ex)
         {
-            Log("network probe failed: " + ex.Message);
+            Log("network probe failed"
+                + (useProxy ? " (proxy)" : string.Empty)
+                + " for "
+                + probeUri.Host
+                + ": "
+                + ex.Message);
             return false;
         }
     }
 
     private HttpClient CreateHttpClient()
     {
+        return CreateHttpClient(ReadBoolEnv(UseProxyEnv, defaultValue: false));
+    }
+
+    private HttpClient CreateHttpClient(bool useProxy)
+    {
         var handler = new HttpClientHandler
         {
-            UseProxy = ReadBoolEnv(UseProxyEnv, defaultValue: false),
-            Proxy = null,
+            UseProxy = useProxy,
+            Proxy = useProxy ? WebRequest.GetSystemWebProxy() : null,
             AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
         };
 
         var client = new HttpClient(handler, disposeHandler: true)
         {
-            Timeout = TimeSpan.FromSeconds(ReadIntEnv(UpdateTimeoutEnv, 20))
+            Timeout = TimeSpan.FromSeconds(ReadIntEnv(UpdateTimeoutEnv, 180))
         };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("HermesGoBootstrap/1.0");
         return client;
@@ -1722,6 +1867,51 @@ internal sealed class HermesBootstrap
         return removed;
     }
 
+    private void StopPortableHermesProcessesBeforeUpdate()
+    {
+        Log("stopping portable Hermes processes before package update");
+        ShutdownLaunchedProcesses();
+
+        var processIds = new HashSet<int>();
+        foreach (var process in Process.GetProcesses())
+        {
+            try
+            {
+                var modulePath = process.MainModule != null ? process.MainModule.FileName : string.Empty;
+                if (string.IsNullOrWhiteSpace(modulePath))
+                {
+                    continue;
+                }
+
+                if (modulePath.StartsWith(_contentRoot, StringComparison.OrdinalIgnoreCase) ||
+                    modulePath.StartsWith(_root, StringComparison.OrdinalIgnoreCase))
+                {
+                    processIds.Add(process.Id);
+                }
+            }
+            catch
+            {
+                // Access denied for some system processes; ignore.
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
+        foreach (var processId in processIds)
+        {
+            if (processId == Process.GetCurrentProcess().Id)
+            {
+                continue;
+            }
+
+            KillProcessTree(processId);
+        }
+
+        Thread.Sleep(1500);
+    }
+
     private void ApplyUpdate(string extractedRoot)
     {
         var extractedContentRoot = ResolvePackageContentRoot(extractedRoot);
@@ -1735,6 +1925,7 @@ internal sealed class HermesBootstrap
             string.IsNullOrEmpty(contentPrefix) ? "logs" : contentPrefix + "/logs",
         };
 
+        var lockedFiles = new List<string>();
         foreach (var file in Directory.GetFiles(extractedRoot, "*", SearchOption.AllDirectories))
         {
             var relative = GetRelativePath(extractedRoot, file);
@@ -1750,8 +1941,44 @@ internal sealed class HermesBootstrap
 
             var destination = Path.Combine(_root, relative);
             Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? _root);
-            File.Copy(file, destination, overwrite: true);
+            if (!TryCopyFileWithRetry(file, destination, maxAttempts: 3))
+            {
+                lockedFiles.Add(relative);
+            }
         }
+
+        if (lockedFiles.Count > 0)
+        {
+            Log("apply update skipped locked files: " + lockedFiles.Count);
+            throw new IOException(
+                "部分文件被占用，更新未完成。请关闭 Hermes Desktop / WebUI / Gateway 后重试。示例：" +
+                lockedFiles[0]);
+        }
+    }
+
+    private bool TryCopyFileWithRetry(string source, string destination, int maxAttempts)
+    {
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                File.Copy(source, destination, overwrite: true);
+                return true;
+            }
+            catch (IOException ex)
+            {
+                Log("file copy retry " + attempt + "/" + maxAttempts + " failed for " + destination + ": " + ex.Message);
+                if (attempt >= maxAttempts)
+                {
+                    return false;
+                }
+
+                StopPortableHermesProcessesBeforeUpdate();
+                Thread.Sleep(1000 * attempt);
+            }
+        }
+
+        return false;
     }
 
     private static string BuildUpdateSummaryText(UpdateSummary summary)

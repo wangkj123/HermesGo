@@ -31,6 +31,9 @@ LOG_FILES = {
     "agent": "agent.log",
     "errors": "errors.log",
     "gateway": "gateway.log",
+    # Hermes Desktop log viewer requests file=gui (Electron GUI process log).
+    "gui": "desktop.log",
+    "desktop": "desktop.log",
 }
 
 # Log line timestamp regex — matches "2026-04-05 22:35:00,123" or

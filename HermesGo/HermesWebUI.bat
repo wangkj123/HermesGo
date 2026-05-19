@@ -1,27 +1,13 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
 
-set "ROOT=%~dp0app"
-if not exist "%ROOT%\runtime\python311\python.exe" set "ROOT=%~dp0"
+set "SCRIPT=%~dp0app\scripts\Start-HermesGo.ps1"
+if not exist "%SCRIPT%" set "SCRIPT=%~dp0Start-HermesGo.ps1"
 
-set "PYTHON=%ROOT%\runtime\python311\python.exe"
-set "WEBUI=%ROOT%\runtime\hermes-webui"
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS%" set "PS=powershell.exe"
 
-if not exist "%PYTHON%" (
-    echo [ERROR] Python not found under package app\runtime\python311
-    pause
-    exit /b 1
-)
-if not exist "%WEBUI%\run.py" (
-    echo [ERROR] WebUI not found: %WEBUI%\run.py
-    pause
-    exit /b 1
-)
-set "PATH=%ROOT%\runtime\bin;%ROOT%\runtime\python311;%ROOT%\runtime\python311\Scripts;%ROOT%;%SystemRoot%\System32"
-set "HERMES_HOME=%ROOT%\home"
-echo Starting Hermes WebUI on http://127.0.0.1:8787 ...
-start "Hermes WebUI" /MIN "%PYTHON%" "%WEBUI%\run.py"
-timeout /t 3 /nobreak >nul
-start http://127.0.0.1:8787
-exit /b 0
+echo Starting Hermes WebUI (gateway + 8787) ...
+"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -WebUIOnly -NoOpenDesktop -NoOpenChat
+exit /b %ERRORLEVEL%

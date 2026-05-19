@@ -33,6 +33,7 @@ if (-not (Test-Path -LiteralPath $launcher)) {
 }
 
 $env:HERMESGO_HEADLESS = "1"
+$env:HERMESGO_ALLOW_HEADLESS = "1"
 $env:HERMESGO_LAUNCH = ($Launch -join ",")
 
 Write-Host "=== HermesGo portable self-test ==="
@@ -50,4 +51,15 @@ if (-not (Test-Path -LiteralPath $smoke)) {
 
 $env:HERMESGO_TEST_APP_ROOT = $appRoot
 & $py $smoke
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+$hello = Join-Path (Split-Path -Parent $PSScriptRoot) "scripts\smoke_hello_all_ui.py"
+if (-not (Test-Path -LiteralPath $hello)) {
+    $hello = Join-Path $appRoot "scripts\smoke_hello_all_ui.py"
+}
+if (Test-Path -LiteralPath $hello) {
+    Write-Host "=== hello smoke (CLI + Dashboard + WebUI + Desktop WS) ==="
+    $env:PYTHONIOENCODING = "utf-8"
+    & $py $hello
+}
 exit $LASTEXITCODE

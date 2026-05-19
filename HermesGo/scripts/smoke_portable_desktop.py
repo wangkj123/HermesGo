@@ -6,6 +6,13 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 
 def _package_root() -> str:
@@ -31,6 +38,36 @@ def _http_ok(url: str) -> bool:
             return 200 <= resp.status < 400
     except Exception:
         return False
+
+
+def _desktop_process_running(desktop_exe: str) -> bool:
+    try:
+        ps_exe = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"),
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe",
+        )
+        ps = subprocess.run(
+            [
+                ps_exe,
+                "-NoProfile",
+                "-Command",
+                (
+                    "Get-Process -Name Hermes -ErrorAction SilentlyContinue | "
+                    "Where-Object { $_.Path -eq '" + desktop_exe.replace("'", "''") + "' } | "
+                    "Select-Object -First 1 -ExpandProperty Id"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+        )
+    except Exception:
+        return False
+    return ps.returncode == 0 and bool(ps.stdout.strip())
 
 
 def main() -> int:
@@ -61,6 +98,9 @@ def main() -> int:
 
     env = os.environ.copy()
     env["HERMESGO_TEST_PACKAGE_ROOT"] = package
+    # DesktopOnly must launch Hermes.exe even when a parent shell set headless for CI.
+    env.pop("HERMESGO_HEADLESS", None)
+    env.pop("HERMESGO_ALLOW_HEADLESS", None)
 
     if os.path.isfile(log_path):
         try:
@@ -88,22 +128,78 @@ def main() -> int:
         return 1
     print("OK HermesDesktop.bat exit 0")
 
+    remote_ready = False
+    local_ready = False
     if os.path.isfile(log_path):
-        text = open(log_path, encoding="utf-8", errors="replace").read()
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
         if "unrecognized arguments: --tui" in text:
             print("FAIL --tui error in desktop.log")
             return 1
         if "backend is ready" not in text and "Desktop boot failed" in text:
             print("FAIL boot failed in desktop.log")
             return 1
+        remote_ready = "Remote Hermes backend is ready" in text
+        local_ready = "backend is ready" in text and not remote_ready
 
-    for port in range(9120, 9200):
-        if _http_ok(f"http://127.0.0.1:{port}/"):
-            print(f"OK embedded dashboard HTTP {port}")
-            return 0
+    embedded_port = None
+    if local_ready:
+        for port in range(9120, 9200):
+            if _http_ok(f"http://127.0.0.1:{port}/"):
+                embedded_port = port
+                print(f"OK embedded dashboard HTTP {port}")
+                break
+        if embedded_port is None:
+            print("FAIL local Desktop backend log exists but no listener 9120-9199")
+            return 1
+    elif remote_ready or _desktop_process_running(desktop_exe):
+        if not _http_ok("http://127.0.0.1:9119/"):
+            print("FAIL Desktop remote mode needs Dashboard HTTP 9119")
+            return 1
+        print("OK desktop remote backend HTTP 9119")
+    else:
+        print("FAIL desktop readiness not observed in remote or local mode")
+        return 1
 
-    print("FAIL no listener 9120-9199 after bat")
-    return 1
+    # Gateway must be alive under portable HERMES_HOME (launcher starts it before Desktop).
+    home = os.path.join(app, "home")
+    os.environ["HERMES_HOME"] = home
+    agent_root = os.path.join(app, "runtime", "hermes-agent")
+    if os.path.isdir(agent_root):
+        sys.path.insert(0, agent_root)
+        try:
+            from gateway.status import get_running_pid
+
+            gw_pid = get_running_pid()
+            if not gw_pid:
+                print("FAIL local gateway not running (gateway.pid / process check)")
+                return 1
+            print(f"OK local gateway pid={gw_pid}")
+        except Exception as exc:
+            print(f"WARN local gateway check: {exc}")
+
+    check_script = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "check_dashboard_gateway.py"
+    )
+    if os.path.isfile(check_script):
+        env = os.environ.copy()
+        env["HERMES_RUNTIME_DIR"] = agent_root
+        env["HERMES_DASHBOARD_URL"] = "http://127.0.0.1:9119/"
+        for attempt in range(15):
+            rc = subprocess.run(
+                [sys.executable, check_script],
+                env=env,
+                capture_output=True,
+                text=True,
+            ).returncode
+            if rc == 0:
+                print("OK dashboard API gateway_running=true")
+                break
+            time.sleep(1)
+        else:
+            print("FAIL dashboard API gateway_running=false after 15s (restart Dashboard via bat)")
+            return 1
+
+    return 0
 
 
 if __name__ == "__main__":

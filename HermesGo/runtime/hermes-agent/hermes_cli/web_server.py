@@ -51,11 +51,12 @@ from hermes_cli.config import (
 from gateway.status import get_running_pid, read_runtime_status
 
 try:
-    from fastapi import FastAPI, HTTPException, Request
+    from fastapi import FastAPI, HTTPException, Request, WebSocket
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
+    from starlette.websockets import WebSocketDisconnect
 except ImportError:
     raise SystemExit(
         "Web UI requires fastapi and uvicorn.\n"
@@ -73,6 +74,9 @@ app = FastAPI(title="Hermes Agent", version=__version__)
 # Injected into the SPA HTML so only the legitimate web UI can use it.
 # ---------------------------------------------------------------------------
 _SESSION_TOKEN = secrets.token_urlsafe(32)
+_SESSION_HEADER_NAME = "X-Hermes-Session-Token"
+_DASHBOARD_EMBEDDED_CHAT_ENABLED = False
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
 
 # Simple rate limiter for the reveal endpoint
 _reveal_timestamps: List[float] = []
@@ -97,6 +101,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/status",
+    "/api/setup/status",
     "/api/config/defaults",
     "/api/config/schema",
     "/api/model/info",
@@ -190,14 +195,28 @@ def test_provider(body: ProviderTestRequest):
     }
 
 
-def _require_token(request: Request) -> None:
-    """Validate the ephemeral session token.  Raises 401 on mismatch.
+def _has_valid_session_token(request: Request) -> bool:
+    """True if the request carries a valid dashboard session token.
 
-    Uses ``hmac.compare_digest`` to prevent timing side-channels.
+    Desktop sends ``X-Hermes-Session-Token``; the dashboard SPA uses
+    ``Authorization: Bearer``. Accept both so remote Desktop shares the
+    same 9119 login as the browser UI.
     """
+    session_header = request.headers.get(_SESSION_HEADER_NAME, "")
+    if session_header and hmac.compare_digest(
+        session_header.encode(),
+        _SESSION_TOKEN.encode(),
+    ):
+        return True
+
     auth = request.headers.get("authorization", "")
     expected = f"Bearer {_SESSION_TOKEN}"
-    if not hmac.compare_digest(auth.encode(), expected.encode()):
+    return hmac.compare_digest(auth.encode(), expected.encode())
+
+
+def _require_token(request: Request) -> None:
+    """Validate the ephemeral session token.  Raises 401 on mismatch."""
+    if not _has_valid_session_token(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -206,9 +225,7 @@ async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     path = request.url.path
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/"):
-        auth = request.headers.get("authorization", "")
-        expected = f"Bearer {_SESSION_TOKEN}"
-        if not hmac.compare_digest(auth.encode(), expected.encode()):
+        if not _has_valid_session_token(request):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Unauthorized"},
@@ -709,6 +726,14 @@ def _looks_like_selfext_objective(goal: str) -> bool:
         "runtime",
     )
     return any(marker in normalized for marker in markers)
+
+
+@app.get("/api/setup/status")
+def get_setup_status_endpoint():
+    """Setup readiness for Dashboard banner (provider + OAuth state)."""
+    from hermes_cli.setup_status import get_setup_status
+
+    return get_setup_status()
 
 
 @app.get("/api/status")
@@ -2845,6 +2870,76 @@ def _mount_plugin_api_routes():
 # Mount plugin API routes before the SPA catch-all.
 _mount_plugin_api_routes()
 
+
+def _is_public_bind() -> bool:
+    return getattr(app.state, "bound_host", "") in {"0.0.0.0", "::"}
+
+
+def _ws_client_is_allowed(ws: WebSocket) -> bool:
+    if _is_public_bind():
+        return True
+    client_host = ws.client.host if ws.client else ""
+    if not client_host:
+        return True
+    return client_host in _LOOPBACK_HOSTS
+
+
+def _ws_client_label(ws: WebSocket) -> str:
+    if ws.client is None:
+        return "unknown"
+    host = ws.client.host or "unknown"
+    port = ws.client.port
+    return f"{host}:{port}" if port is not None else host
+
+
+@app.websocket("/api/ws")
+async def gateway_ws(ws: WebSocket) -> None:
+    """JSON-RPC gateway for Hermes Desktop (setup.status, chat, etc.)."""
+    peer = _ws_client_label(ws)
+    if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
+        _log.warning(
+            "gateway-ws reject peer=%s reason=embedded_chat_disabled close_code=4403",
+            peer,
+        )
+        await ws.close(code=4403)
+        return
+
+    token = ws.query_params.get("token", "")
+    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        _log.warning(
+            "gateway-ws reject peer=%s reason=bad_token close_code=4401",
+            peer,
+        )
+        await ws.close(code=4401)
+        return
+
+    if not _ws_client_is_allowed(ws):
+        _log.warning(
+            "gateway-ws reject peer=%s reason=non_loopback close_code=4403",
+            peer,
+        )
+        await ws.close(code=4403)
+        return
+
+    from tui_gateway.ws import handle_ws
+
+    _log.info("gateway-ws connect peer=%s", peer)
+    try:
+        await handle_ws(ws)
+    except WebSocketDisconnect as exc:
+        _log.info(
+            "gateway-ws disconnect peer=%s code=%s reason=%s",
+            peer,
+            getattr(exc, "code", None),
+            getattr(exc, "reason", None),
+        )
+    except Exception:
+        _log.exception("gateway-ws error peer=%s", peer)
+        raise
+    else:
+        _log.info("gateway-ws closed peer=%s", peer)
+
+
 mount_spa(app)
 
 
@@ -2853,10 +2948,15 @@ def start_server(
     port: int = 9119,
     open_browser: bool = True,
     allow_public: bool = False,
-    embedded_chat: bool = False,  # accepted for compatibility with newer main.py
+    embedded_chat: bool = False,
 ):
     """Start the web UI server."""
     import uvicorn
+
+    global _DASHBOARD_EMBEDDED_CHAT_ENABLED
+    _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
+    app.state.bound_host = host
+    app.state.bound_port = port
 
     _LOCALHOST = ("127.0.0.1", "localhost", "::1")
     if host not in _LOCALHOST and not allow_public:
@@ -2882,5 +2982,11 @@ def start_server(
 
         threading.Thread(target=_open, daemon=True).start()
 
+    _log.info(
+        "dashboard starting host=%s port=%s embedded_chat=%s",
+        host,
+        port,
+        embedded_chat,
+    )
     print(f"  Hermes Web UI → http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)

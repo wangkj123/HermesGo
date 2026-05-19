@@ -88,8 +88,38 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
     return _get_lock_dir() / f"{scope}-{_scope_hash(identity)}.lock"
 
 
+def _pid_is_alive(pid: int) -> bool:
+    """Return True when ``pid`` refers to a live process on this OS."""
+    if pid <= 0:
+        return False
+    if _IS_WINDOWS:
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we cannot signal it.
+        return True
+
+
 def _get_process_start_time(pid: int) -> Optional[int]:
     """Return the kernel start time for a process when available."""
+    if _IS_WINDOWS:
+        return None
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
@@ -100,6 +130,26 @@ def _get_process_start_time(pid: int) -> Optional[int]:
 
 def _read_process_cmdline(pid: int) -> Optional[str]:
     """Return the process command line as a space-separated string."""
+    if _IS_WINDOWS:
+        try:
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            if result.returncode != 0:
+                return None
+            cmdline = (result.stdout or "").strip()
+            return cmdline or None
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+
     cmdline_path = Path(f"/proc/{pid}/cmdline")
     try:
         raw = cmdline_path.read_bytes()
@@ -111,19 +161,26 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
     return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
 
 
+def _cmdline_looks_like_gateway(cmdline: str) -> bool:
+    normalized = cmdline.replace("\\", "/")
+    patterns = (
+        "hermes_cli.main gateway",
+        "hermes_cli/main.py gateway",
+        "hermes_cli/main.py",
+        "hermes gateway",
+        "gateway/run.py",
+    )
+    if not any(pattern in normalized for pattern in patterns):
+        return False
+    return " gateway" in normalized or normalized.rstrip().endswith("gateway")
+
+
 def _looks_like_gateway_process(pid: int) -> bool:
     """Return True when the live PID still looks like the Hermes gateway."""
     cmdline = _read_process_cmdline(pid)
     if not cmdline:
         return False
-
-    patterns = (
-        "hermes_cli.main gateway",
-        "hermes_cli/main.py gateway",
-        "hermes gateway",
-        "gateway/run.py",
-    )
-    return any(pattern in cmdline for pattern in patterns)
+    return _cmdline_looks_like_gateway(cmdline)
 
 
 def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
@@ -136,13 +193,7 @@ def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
         return False
 
     cmdline = " ".join(str(part) for part in argv)
-    patterns = (
-        "hermes_cli.main gateway",
-        "hermes_cli/main.py gateway",
-        "hermes gateway",
-        "gateway/run.py",
-    )
-    return any(pattern in cmdline for pattern in patterns)
+    return _cmdline_looks_like_gateway(cmdline)
 
 
 def _build_pid_record() -> dict:
@@ -430,9 +481,7 @@ def get_running_pid() -> Optional[int]:
         remove_pid_file()
         return None
 
-    try:
-        os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-    except (ProcessLookupError, PermissionError):
+    if not _pid_is_alive(pid):
         remove_pid_file()
         return None
 
