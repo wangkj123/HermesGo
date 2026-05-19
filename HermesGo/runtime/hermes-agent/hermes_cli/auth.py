@@ -484,10 +484,28 @@ def _resolve_api_key_provider_secret(
             pass
         return "", ""
 
+    from hermes_cli.config import get_env_value
+
     for env_var in pconfig.api_key_env_vars:
-        val = os.getenv(env_var, "").strip()
+        val = (get_env_value(env_var) or os.getenv(env_var, "")).strip()
         if has_usable_secret(val):
             return val, env_var
+
+    try:
+        from agent.credential_pool import load_pool
+
+        pool = load_pool(provider_id)
+        if pool and pool.has_credentials():
+            entry = pool.select()
+            if entry is not None:
+                token = (
+                    getattr(entry, "runtime_api_key", None)
+                    or getattr(entry, "access_token", "")
+                )
+                if has_usable_secret(token):
+                    return str(token).strip(), f"pool:{provider_id}"
+    except Exception:
+        pass
 
     return "", ""
 

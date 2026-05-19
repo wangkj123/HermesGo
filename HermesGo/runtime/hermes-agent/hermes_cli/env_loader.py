@@ -42,6 +42,11 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
     # typically come from copy-pasting keys from PDFs or rich-text editors
     # that substitute Unicode lookalike glyphs (e.g. ʋ U+028B for v).
     _sanitize_loaded_credentials()
+    # Blank placeholders in portable templates (DEEPSEEK_API_KEY=) must not
+    # mask persisted credential-pool entries or valid parent-process exports.
+    for key, value in list(os.environ.items()):
+        if any(key.endswith(suffix) for suffix in _CREDENTIAL_SUFFIXES) and not str(value or "").strip():
+            os.environ.pop(key, None)
 
 
 def _sanitize_env_file_if_needed(path: Path) -> None:

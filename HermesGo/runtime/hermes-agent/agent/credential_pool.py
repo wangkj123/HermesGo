@@ -28,6 +28,7 @@ from hermes_cli.auth import (
     _resolve_zai_base_url,
     _save_auth_store,
     _save_provider_state,
+    has_usable_secret,
     read_credential_pool,
     write_credential_pool,
 )
@@ -1204,16 +1205,23 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
 
 
 def _prune_stale_seeded_entries(entries: List[PooledCredential], active_sources: Set[str]) -> bool:
-    retained = [
-        entry
-        for entry in entries
-        if _is_manual_source(entry.source)
-        or entry.source in active_sources
-        or not (
+    def _retain(entry: PooledCredential) -> bool:
+        if _is_manual_source(entry.source):
+            return True
+        if entry.source in active_sources:
+            return True
+        if not (
             entry.source.startswith("env:")
             or entry.source in {"claude_code", "hermes_pkce"}
-        )
-    ]
+        ):
+            return True
+        # Keep env-seeded pool entries that still carry a persisted secret.
+        # Portable CLI/gateway processes may load ~/.hermes/.env after pool
+        # resolution; do not wipe keys the user saved via Dashboard.
+        token = getattr(entry, "access_token", None) or getattr(entry, "runtime_api_key", None) or ""
+        return has_usable_secret(token)
+
+    retained = [entry for entry in entries if _retain(entry)]
     if len(retained) == len(entries):
         return False
     entries[:] = retained

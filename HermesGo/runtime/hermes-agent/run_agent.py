@@ -992,8 +992,28 @@ class AIAgent:
 
             if runtime and runtime.get("base_url"):
                 resolved_base = str(runtime.get("base_url") or "").strip()
-                resolved_key = str(runtime.get("api_key") or "").strip() or "no-key-required"
+                resolved_key = str(runtime.get("api_key") or "").strip()
                 resolved_provider = str(runtime.get("provider") or "").strip().lower()
+                try:
+                    from hermes_cli.auth import PROVIDER_REGISTRY, has_usable_secret
+                except Exception:
+                    PROVIDER_REGISTRY = {}
+                    has_usable_secret = lambda value, **_: bool(str(value or "").strip())
+
+                if not has_usable_secret(resolved_key):
+                    _pcfg = PROVIDER_REGISTRY.get(resolved_provider)
+                    if _pcfg and getattr(_pcfg, "auth_type", "") == "api_key":
+                        _env_hint = (
+                            _pcfg.api_key_env_vars[0]
+                            if getattr(_pcfg, "api_key_env_vars", None)
+                            else f"{resolved_provider.upper()}_API_KEY"
+                        )
+                        raise RuntimeError(
+                            f"Provider '{resolved_provider}' is set in config.yaml but no API key "
+                            f"was found. Set {_env_hint} in {os.getenv('HERMES_HOME', '~/.hermes')}/.env "
+                            f"or Dashboard /env, or switch providers with `hermes model`."
+                        )
+                    resolved_key = resolved_key or "no-key-required"
                 client_kwargs = {"api_key": resolved_key, "base_url": resolved_base}
                 if resolved_provider:
                     self.provider = resolved_provider

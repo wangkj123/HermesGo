@@ -192,3 +192,9 @@ Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`�
 - **错误做法**：只登记 agent/errors/gateway，不映射 Desktop 请求的 `gui`
 - **正确做法**：`hermes_cli/logs.py` 的 `LOG_FILES` 增加 `"gui"`/`"desktop"` → `desktop.log`
 - **涉及文件**：`runtime/hermes-agent/hermes_cli/logs.py`
+
+### 2026-05-19 — Dashboard DeepSeek 连通 OK 但 CLI 401（****ired）
+- **现象**：9119 `/api/providers/test` 成功；`hermes chat -q hello` 报 `Authentication Fails, Your api key: ****ired is invalid`；`app/home/.env` 里 `DEEPSEEK_API_KEY=` 为空
+- **错误做法**：只信 Dashboard 进程内 `os.environ`；让 `load_pool` 在 env 空时 prune 掉 `auth.json` 里 `env:DEEPSEEK_API_KEY` 条目；无 key 时仍用 `no-key-required` 调 API
+- **正确做法**：`credential_pool._prune_stale_seeded_entries` 保留仍含可用 `access_token` 的 env 种子条目；`_resolve_api_key_provider_secret` 读 `get_env_value` + credential pool；`run_agent` 对 `api_key` provider 无 key 时 fail-fast；`env_loader` 不把空 `*_API_KEY=` 写入进程环境；Dashboard 保存密钥后确认 `app/home/.env` 非空
+- **涉及文件**：`agent/credential_pool.py`、`hermes_cli/auth.py`、`hermes_cli/env_loader.py`、`run_agent.py`

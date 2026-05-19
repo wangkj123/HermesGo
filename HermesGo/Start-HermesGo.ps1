@@ -654,6 +654,12 @@ function Merge-PortableEnvFromKnownSources {
             Write-LauncherLine "Imported DEEPSEEK_API_KEY from HERMESGO_DEEPSEEK_API_KEY"
         }
     }
+    $deepseekFromProfile = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
+    if (-not [string]::IsNullOrWhiteSpace($deepseekFromProfile) -and [string]::IsNullOrWhiteSpace($current["DEEPSEEK_API_KEY"])) {
+        $current["DEEPSEEK_API_KEY"] = $deepseekFromProfile
+        $merged = $true
+        Write-LauncherLine "Persisted DEEPSEEK_API_KEY from profile/env into portable .env"
+    }
     if ($merged) {
         $lines = @(
             "# Hermes portable API keys (Dashboard http://127.0.0.1:9119/env)"
