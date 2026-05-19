@@ -8,32 +8,55 @@ import os
 from pathlib import Path
 
 
-def detect_portable_hermes_home() -> Path | None:
-    """Return ``app/home`` for HermesGo portable layout when HERMES_HOME is unset."""
+def get_portable_app_root() -> Path | None:
+    """Return the portable ``app/`` directory when running inside HermesGo.
+
+    The launcher sets ``HERMES_PORTABLE_APP_ROOT``; this is the unambiguous
+    source of truth for green-zip layout (``HermesGo/app/home``, not
+    ``~/.hermes`` and not a stale ``HermesGo/home`` dev mirror).
+    """
+    explicit = os.environ.get("HERMES_PORTABLE_APP_ROOT", "").strip()
+    if explicit:
+        root = Path(explicit).resolve()
+        if (root / "runtime" / "hermes-agent").is_dir():
+            return root
+
     override = os.environ.get("HERMES_DESKTOP_HERMES_ROOT", "").strip()
     if override:
         agent_root = Path(override).resolve()
-        portable_home = agent_root.parent.parent / "home"
-        if portable_home.is_dir():
-            return portable_home
+        app_root = agent_root.parent.parent
+        if (app_root / "home").is_dir():
+            return app_root
 
     try:
         import hermes_cli
 
         agent_root = Path(hermes_cli.__file__).resolve().parent.parent
-        portable_home = agent_root.parent.parent / "home"
-        if not portable_home.is_dir():
+        app_root = agent_root.parent.parent
+        if not (app_root / "home").is_dir():
+            return None
+        if not (app_root / "runtime" / "hermes-agent").is_dir():
             return None
         markers = (
-            portable_home / "config.yaml",
-            portable_home / "gateway.pid",
-            portable_home / "auth.json",
+            app_root / "home" / "config.yaml",
+            app_root / "home" / "gateway.pid",
+            app_root / "home" / "auth.json",
+            app_root / "home" / "config.yaml.slim-default",
         )
         if any(marker.exists() for marker in markers):
-            return portable_home
+            return app_root
     except Exception:
         return None
     return None
+
+
+def detect_portable_hermes_home() -> Path | None:
+    """Return ``app/home`` for HermesGo portable layout when HERMES_HOME is unset."""
+    app_root = get_portable_app_root()
+    if app_root is None:
+        return None
+    portable_home = app_root / "home"
+    return portable_home if portable_home.is_dir() else None
 
 
 def ensure_portable_hermes_home_env() -> Path:
@@ -140,17 +163,23 @@ def get_hermes_dir(new_subpath: str, old_name: str) -> Path:
 def display_hermes_home() -> str:
     """Return a user-friendly display string for the current HERMES_HOME.
 
-    Uses ``~/`` shorthand for readability::
-
-        default:  ``~/.hermes``
-        profile:  ``~/.hermes/profiles/coder``
-        custom:   ``/opt/hermes-custom``
+    Portable HermesGo installs show ``<package>/app/home`` (the real data
+    dir) instead of ``~/.hermes``, which is only used for non-portable installs.
 
     Use this in **user-facing** print/log messages instead of hardcoding
     ``~/.hermes``.  For code that needs a real ``Path``, use
     :func:`get_hermes_home` instead.
     """
-    home = get_hermes_home()
+    home = get_hermes_home().resolve()
+    app_root = get_portable_app_root()
+    if app_root is not None:
+        try:
+            rel = home.relative_to(app_root.resolve())
+            package_dir = app_root.resolve().parent.name or "HermesGo"
+            rel_posix = rel.as_posix()
+            return f"{package_dir}/app/{rel_posix}" if rel_posix else f"{package_dir}/app/home"
+        except ValueError:
+            return str(home)
     try:
         return "~/" + str(home.relative_to(Path.home()))
     except ValueError:

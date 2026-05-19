@@ -11,16 +11,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from packaging_release import PRESERVE_APP_DIRS, verify_test_package_matches_zip
 from packaging_safe import assert_zip_has_no_reserved_entries
-
-# User state under app/ — kept across sync (same as bootstrap ApplyUpdate preserve).
-PRESERVE_APP_DIRS = (
-    "app/home",
-    "app/data",
-    "app/logs",
-    "app/workspace",
-    "app/webui-data",
-)
 
 DEFAULT_TEST_PACKAGE_ROOT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -81,6 +73,13 @@ def sync_test_package_from_zip(zip_path: str, dest_root: str) -> None:
     print(f"  from zip: {zip_path}")
     if preserved:
         print(f"  preserved: {', '.join(sorted(preserved))}")
+
+    mismatches = verify_test_package_matches_zip(zip_path, dest_root)
+    if mismatches:
+        raise RuntimeError(
+            "Test package sync verification failed:\n  - " + "\n  - ".join(mismatches)
+        )
+    print("Test package sync verified (key files match zip)")
 
 
 def resolve_test_package_root() -> str:

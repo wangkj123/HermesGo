@@ -11,7 +11,7 @@ $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.e
 
 if (-not $ZipPath) {
     $dist = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "dist"
-    $ZipPath = Get-ChildItem -LiteralPath $dist -Filter "HermesGo-*-v0.14-green-3ui-slim.zip" |
+    $ZipPath = Get-ChildItem -LiteralPath $dist -Filter "HermesGo-*-green-3ui-slim.zip" |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1 -ExpandProperty FullName
 }

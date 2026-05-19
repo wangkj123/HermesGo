@@ -24,7 +24,9 @@ alwaysApply: false
 | 自测运行环境 | WSL 里测 COM/便携包 | **Windows 本机** Shell + 包内 Python 绝对路径 |
 | zip 根目录 | 散落 scripts/tools | 仅 `HermesGo.exe`、`README.txt`、三个 `.bat`；其余在 `app/` |
 | 产物位置 | `build_zip_slim.py` 复制 zip 到桌面 | 只输出 `dist/`；测试树用 `packaging_sync` 同步，**不要**拷到 Desktop |
-| dist 清理 | 保留每次构建的全部历史 zip | 只保留**最新一份** slim zip + `README.txt`，旧包删除 |
+| dist 清理 | 保留每次构建的全部历史 zip | `build_zip_slim.py` 构建后 `prune_old_slim_zips` 只留最新 slim zip + `README.txt` |
+| 版本号 | zip 名 `v0.14.5` 但 `__version__` 仍 `0.14.2` | `packaging_release.SLIM_VERSION` + `ensure_runtime_version()` 打包前对齐 |
+| sync 校验 | 构建后不验证测试树 | `packaging_sync` 结束后 `verify_test_package_matches_zip`；失败 exit 1 |
 | Windows 保留名 | zip 含 `nul` 等 | `packaging_safe.py` 跳过/校验；启动时 `Remove-WindowsReservedArtifacts` |
 
 ## 已记录教训（按时间追加）
@@ -192,6 +194,24 @@ Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`�
 - **错误做法**：只登记 agent/errors/gateway，不映射 Desktop 请求的 `gui`
 - **正确做法**：`hermes_cli/logs.py` 的 `LOG_FILES` 增加 `"gui"`/`"desktop"` → `desktop.log`
 - **涉及文件**：`runtime/hermes-agent/hermes_cli/logs.py`
+
+### 2026-05-19 — 构建后测试包未同步 / sync 半失败毁目录
+- **现象**：`dist` 最新 zip 的 `Start-HermesGo.ps1` 与 `HermesGo-slim-test-v014` 哈希不一致；`packaging_sync` 报 WinError 32；测试树 `app/runtime/hermes-agent` 被删一半
+- **错误做法**：只跑 `build_zip_slim.py` 不确认 sync 输出；进程占用时仍 `shutil.rmtree`；用 `Copy-Item` 单文件「补同步」
+- **正确做法**：构建后看 `Test package synced`；sync 前结束所有 `HermesGo-*` 下 python/Hermes.exe；失败则换 `--dest` 或先 `taskkill` 再整包 `packaging_sync.py --zip ...`；自测以 zip 哈希为准
+- **涉及文件**：`HermesGo/packaging_sync.py`、`HermesGo/build_zip_slim.py`
+
+### 2026-05-19 — 发行 tag 与运行时 __version__ 不一致
+- **现象**：zip 名 `v0.14.5-green-3ui-slim`，`hermes_cli/__init__.py` 仍为 `0.14.2`；GitHub 同 tag 多次换包，用户难判断要不要点更新
+- **错误做法**：只改 `build_zip_slim.py` 的 `RELEASE_TAG` 不改 `__version__`；同日多次上传同 tag 资产
+- **正确做法**：打包前同步 bump `runtime/hermes-agent/hermes_cli/__init__.py`；同 tag 只保留一份 zip 或换新 tag；`ShouldUpdateRelease` 依赖 AgentVersion 解析
+- **涉及文件**：`HermesGo/build_zip_slim.py`、`runtime/hermes-agent/hermes_cli/__init__.py`、`HermesGoBootstrap.cs`
+
+### 2026-05-19 — exe 自动更新未保留 workspace/webui-data（已修复）
+- **现象**：`packaging_sync` 会保留 `app/workspace`、`app/webui-data`；`HermesGoBootstrap.ApplyUpdate` 只跳过 `app/home|data|logs`
+- **错误做法**：假设开发侧 sync 与用户侧 exe 更新保留范围相同
+- **正确做法**：`packaging_release.PRESERVE_*` 为唯一列表；`ApplyUpdate` 与 `packaging_sync` 均保留五目录；改 bootstrap 后须 `Compile-HermesGoBootstrap.ps1` 并 `build_zip_slim.py`
+- **涉及文件**：`packaging_release.py`、`packaging_sync.py`、`create_hermes_go/HermesGoBootstrap.cs`
 
 ### 2026-05-19 — Dashboard DeepSeek 连通 OK 但 CLI 401（****ired）
 - **现象**：9119 `/api/providers/test` 成功；`hermes chat -q hello` 报 `Authentication Fails, Your api key: ****ired is invalid`；`app/home/.env` 里 `DEEPSEEK_API_KEY=` 为空

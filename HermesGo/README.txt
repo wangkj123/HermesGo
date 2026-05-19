@@ -1,8 +1,8 @@
-HermesGo green portable package (v0.14.2, three UIs)
-HermesGo 绿色便携包（v0.14.2，三套界面）
+HermesGo green portable package (v0.14.4, three UIs)
+HermesGo 绿色便携包（v0.14.4，三套界面）
 
-Current release tag: v0.14.2-green-3ui-slim
-当前发行标签：v0.14.2-green-3ui-slim
+Current release tag: v0.14.4-green-3ui-slim
+当前发行标签：v0.14.4-green-3ui-slim
 
 Latest releases: https://github.com/wangkj123/HermesGo/releases/latest
 最新发布页：https://github.com/wangkj123/HermesGo/releases/latest
@@ -105,8 +105,8 @@ This slim build (~220 MB) does NOT include bundled Ollama or pre-downloaded mode
 Use cloud API keys on Dashboard, or install Ollama separately for local models.
 云端 Key 请在 Dashboard 配置；本地模型请自行安装 Ollama。
 
-v0.14.2 includes Desktop remote binding to Dashboard/gateway plus WebUI board backend.
-v0.14.2 含 Desktop 连接 Dashboard/gateway 修复与 WebUI 看板后端。
+v0.14.4 fixes Dashboard Kanban 500 (kanban_db sync + legacy DB migration).
+v0.14.4 修复 Dashboard 看板 500（kanban_db 同步 + 旧库迁移顺序）。
 
 Auto-update: HermesGo.exe checks wangkj123/HermesGo for newer *green-3ui-slim* zip.
 自动更新：HermesGo.exe 从 wangkj123/HermesGo 拉取新版 *green-3ui-slim* zip。

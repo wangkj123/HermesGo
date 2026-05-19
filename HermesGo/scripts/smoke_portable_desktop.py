@@ -71,6 +71,11 @@ def _desktop_process_running(desktop_exe: str) -> bool:
 
 
 def main() -> int:
+    verify_only = "--verify-only" in sys.argv or os.environ.get("HERMESGO_VERIFY_DESKTOP_ONLY", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    )
     package = _package_root()
     app = _app_root(package)
     bat = os.path.join(package, "HermesDesktop.bat")
@@ -108,25 +113,28 @@ def main() -> int:
         except OSError:
             pass
 
-    ps = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    print(f"RUN {bat}")
-    proc = subprocess.run(
-        [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", f"& '{bat}'"],
-        cwd=package,
-        env=env,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=120,
-    )
-    out = (proc.stdout or "") + (proc.stderr or "")
-    if out.strip():
-        print(out[-2000:])
+    if not verify_only:
+        ps = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        print(f"RUN {bat}")
+        proc = subprocess.run(
+            [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", f"& '{bat}'"],
+            cwd=package,
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=120,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        if out.strip():
+            print(out[-2000:])
 
-    if proc.returncode != 0:
-        print(f"FAIL HermesDesktop.bat exit {proc.returncode}")
-        return 1
-    print("OK HermesDesktop.bat exit 0")
+        if proc.returncode != 0:
+            print(f"FAIL HermesDesktop.bat exit {proc.returncode}")
+            return 1
+        print("OK HermesDesktop.bat exit 0")
+    else:
+        print("SKIP launch (verify-only; services already up)")
 
     remote_ready = False
     local_ready = False

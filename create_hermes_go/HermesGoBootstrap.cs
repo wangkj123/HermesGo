@@ -185,8 +185,15 @@ internal sealed class HermesBootstrap
 
     private static string ResolvePackageContentRoot(string packageRoot)
     {
+        // Match Start-HermesGo.ps1: only treat app/ as content root when portable Python lives there.
         var appRoot = Path.Combine(packageRoot, "app");
-        return Directory.Exists(appRoot) ? appRoot : packageRoot;
+        var appPython = Path.Combine(appRoot, "runtime", "python311", "python.exe");
+        if (File.Exists(appPython))
+        {
+            return appRoot;
+        }
+
+        return packageRoot;
     }
 
     public async Task RunAsync()
@@ -1923,6 +1930,8 @@ internal sealed class HermesBootstrap
             string.IsNullOrEmpty(contentPrefix) ? "home" : contentPrefix + "/home",
             string.IsNullOrEmpty(contentPrefix) ? "data" : contentPrefix + "/data",
             string.IsNullOrEmpty(contentPrefix) ? "logs" : contentPrefix + "/logs",
+            string.IsNullOrEmpty(contentPrefix) ? "workspace" : contentPrefix + "/workspace",
+            string.IsNullOrEmpty(contentPrefix) ? "webui-data" : contentPrefix + "/webui-data",
         };
 
         var lockedFiles = new List<string>();
@@ -3970,6 +3979,7 @@ internal sealed class HermesBootstrap
             Environment.GetEnvironmentVariable("PATH") ?? string.Empty,
         });
         psi.EnvironmentVariables["HERMES_HOME"] = _homeDir;
+        psi.EnvironmentVariables["HERMES_PORTABLE_APP_ROOT"] = _contentRoot;
         psi.EnvironmentVariables["OLLAMA_MODELS"] = _ollamaModelsDir;
         psi.EnvironmentVariables["PYTHONUTF8"] = "1";
         psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
@@ -4867,8 +4877,7 @@ internal sealed class HermesBootstrap
         private string GetPackageRoot()
         {
             var exeDir = Path.GetDirectoryName(Application.ExecutablePath) ?? string.Empty;
-            var appDir = Path.Combine(exeDir, "app");
-            return Directory.Exists(appDir) ? appDir : exeDir;
+            return ResolvePackageContentRoot(exeDir);
         }
 
         private static Size GetScaledClientSize(int baseWidth, int baseHeight)

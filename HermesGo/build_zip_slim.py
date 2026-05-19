@@ -20,12 +20,19 @@ import zipfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
+from packaging_release import (
+    RELEASE_TAG,
+    SLIM_VERSION,
+    ensure_runtime_version,
+    prune_old_slim_zips,
+    read_runtime_version,
+)
 from packaging_safe import assert_zip_has_no_reserved_entries, is_windows_reserved_name, should_skip_pack_path
 from packaging_sync import resolve_test_package_root, sync_test_package_from_zip
+
 OUT_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "dist")
 DT = datetime.datetime.now().strftime("%Y.%m.%d-%H%M%S")
-VERSION = "0.14.2"
-RELEASE_TAG = f"v{VERSION}-green-3ui-slim"
+VERSION = SLIM_VERSION
 ZIP_NAME = f"HermesGo-{DT}-{RELEASE_TAG}.zip"
 ZIP_PATH = os.path.join(OUT_DIR, ZIP_NAME)
 
@@ -50,6 +57,11 @@ SLIM_APP_SCRIPT_FILES = (
 
 SLIM_DEV_SCRIPT_FILES = (
     "check_dashboard_gateway.py",
+    "smoke_portable_connect.py",
+    "smoke_portable_desktop.py",
+    "smoke_kanban_all_ui.py",
+    "smoke_kanban_api.py",
+    "smoke_hello_all_ui.py",
 )
 
 SLIM_APP_TOOL_FILES = ("codex.cmd",)
@@ -143,8 +155,13 @@ def add_tree(zf: zipfile.ZipFile, base: str, rel_prefix: str) -> tuple[int, int]
     return count, total
 
 
-def main() -> None:
+def main() -> int:
     os.makedirs(OUT_DIR, exist_ok=True)
+    ensure_runtime_version(VERSION)
+    runtime_ver = read_runtime_version()
+    if runtime_ver != VERSION:
+        print(f"ERROR: runtime version {runtime_ver!r} != build {VERSION!r}")
+        return 1
 
     ps1_path = os.path.join(SCRIPT_DIR, "Start-HermesGo.ps1")
     with open(ps1_path, "r", encoding="utf-8") as f:
@@ -253,7 +270,7 @@ def main() -> None:
             "Cloud API keys (e.g. DeepSeek) work as in the full package. "
             "For local Gemma/Ollama, install Ollama separately or add models under "
             "`app/data/ollama/models`.\n\n"
-            "v0.14.2: includes Desktop remote binding to Dashboard/gateway plus WebUI board backend.\n"
+            f"v{VERSION}: sync verify, dist prune, preserve workspace/webui-data on exe update.\n"
             "Optional: `runtime/hermes-desktop/` (portable Electron, run `HermesDesktop.bat`).\n"
             "Package root keeps only `HermesGo.exe`, `README.txt`, and the three `.bat` launchers;\n"
             "scripts, tools, assets, and runtime live under `app/`.\n"
@@ -274,16 +291,27 @@ def main() -> None:
     print(f"Files: {included}, raw ~{included_size / 1024 / 1024:.1f} MB")
     print(f"ZIP: {zsize / 1024 / 1024:.1f} MB")
     print(f"Done: {ZIP_PATH}")
+    removed = prune_old_slim_zips(OUT_DIR, ZIP_PATH)
+    if removed:
+        print(f"Pruned {removed} older slim zip(s) from dist/")
 
     if os.environ.get("HERMESGO_SKIP_TEST_SYNC", "").strip().lower() in ("1", "true", "yes"):
         print("Test sync skipped (HERMESGO_SKIP_TEST_SYNC)")
-    else:
-        test_root = resolve_test_package_root()
-        try:
-            sync_test_package_from_zip(ZIP_PATH, test_root)
-        except OSError as e:
-            print(f"WARN: test package sync failed: {e}")
+        return 0
+
+    test_root = resolve_test_package_root()
+    try:
+        sync_test_package_from_zip(ZIP_PATH, test_root)
+    except OSError as exc:
+        print(f"ERROR: test package sync failed: {exc}")
+        print("Stop HermesGo python/Hermes.exe processes and retry, or set HERMESGO_SKIP_TEST_SYNC=1")
+        return 1
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

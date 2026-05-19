@@ -823,10 +823,15 @@ async def get_status():
     except Exception:
         pass
 
+    from hermes_constants import display_hermes_home, get_portable_app_root
+
+    portable_root = get_portable_app_root()
     return {
         "version": __version__,
         "release_date": __release_date__,
         "hermes_home": str(get_hermes_home()),
+        "hermes_home_display": display_hermes_home(),
+        "portable_app_root": str(portable_root) if portable_root else None,
         "config_path": str(get_config_path()),
         "env_path": str(get_env_path()),
         "config_version": current_ver,
@@ -2857,6 +2862,25 @@ def _mount_plugin_api_routes():
                 continue
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
+            # Dynamic import leaves Pydantic v2 models forward-ref unresolved;
+            # POST/PATCH bodies on plugin routes 500 until model_rebuild().
+            try:
+                from pydantic import BaseModel
+
+                type_ns = dict(vars(mod))
+                for attr in vars(mod).values():
+                    if (
+                        isinstance(attr, type)
+                        and issubclass(attr, BaseModel)
+                        and attr is not BaseModel
+                    ):
+                        attr.model_rebuild(_types_namespace=type_ns)
+            except Exception as rebuild_exc:
+                _log.warning(
+                    "Plugin %s pydantic model_rebuild failed: %s",
+                    plugin["name"],
+                    rebuild_exc,
+                )
             router = getattr(mod, "router", None)
             if router is None:
                 _log.warning("Plugin %s api file has no 'router' attribute", plugin["name"])

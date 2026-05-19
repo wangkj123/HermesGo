@@ -133,6 +133,9 @@ def get_setup_status() -> Dict[str, Any]:
         message = "尚未配置模型提供商。请在 OAuth 登录或环境变量中配置 API Key，或运行 hermes setup"
         message_en = "No model provider configured. Connect OAuth, set API keys, or run hermes setup"
 
+    from hermes_constants import display_hermes_home, get_portable_app_root
+
+    portable_root = get_portable_app_root()
     return {
         "setup_state": state,
         "configured": configured,
@@ -142,6 +145,8 @@ def get_setup_status() -> Dict[str, Any]:
         "model": model or None,
         "base_url": base_url or None,
         "hermes_home": home,
+        "hermes_home_display": display_hermes_home(),
+        "portable_app_root": str(portable_root) if portable_root else None,
         "message": message,
         "message_en": message_en,
         "runtime_error": runtime_error,

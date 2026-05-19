@@ -29,8 +29,11 @@ def _portable_path(app_root: str) -> str:
     return os.pathsep.join(parts)
 
 
-def _http_get(url: str, timeout: float = 10.0) -> tuple[int, bytes]:
-    req = urllib.request.Request(url, method="GET")
+def _http_get(url: str, timeout: float = 10.0, token: str | None = None) -> tuple[int, bytes]:
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, method="GET", headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.status, resp.read()
 
@@ -125,17 +128,24 @@ def main() -> int:
         has_key = bool(str(runtime.get("api_key") or "").strip())
         print(f"OK runtime provider={runtime.get('provider')} api_mode={api_mode} base_url={base_url} has_key={has_key}")
 
-        if token and provider:
-            status, body = _api_post_json(
-                "http://127.0.0.1:9119/api/providers/test",
-                {"provider_id": provider.replace("_", "-")},
-                token,
-            )
-            if status == 200 and body.get("ok"):
-                print(f"OK /api/providers/test: {body}")
-            else:
-                print(f"FAIL /api/providers/test: HTTP {status} {body}")
+        if token and provider and has_key:
+            try:
+                status, body = _api_post_json(
+                    "http://127.0.0.1:9119/api/providers/test",
+                    {"provider_id": provider.replace("_", "-")},
+                    token,
+                )
+            except urllib.error.HTTPError as exc:
+                print(f"FAIL /api/providers/test: HTTP {exc.code}")
                 failures += 1
+            else:
+                if status == 200 and body.get("ok"):
+                    print(f"OK /api/providers/test: {body}")
+                else:
+                    print(f"FAIL /api/providers/test: HTTP {status} {body}")
+                    failures += 1
+        elif token and provider:
+            print("WARN /api/providers/test skipped (no API key in portable home)")
         elif has_key and api_mode == "codex_responses":
             print("OK codex credentials resolved (dashboard probe skipped)")
     except Exception as exc:
@@ -143,19 +153,54 @@ def main() -> int:
         failures += 1
 
     try:
+        import json
+
         status, body = _http_get("http://127.0.0.1:8787/api/kanban/boards", timeout=8.0)
         if status == 200:
-            import json
-
             data = json.loads(body.decode("utf-8"))
             boards = data.get("boards") or []
-            print(f"OK kanban boards: count={len(boards)}")
+            print(f"OK webui kanban boards: count={len(boards)}")
         else:
-            print(f"FAIL kanban: HTTP {status}")
+            print(f"FAIL webui kanban: HTTP {status}")
             failures += 1
     except Exception as exc:
-        print(f"FAIL kanban: {exc}")
+        print(f"FAIL webui kanban: {exc}")
         failures += 1
+
+    if token:
+        try:
+            import json
+
+            status, body = _http_get(
+                "http://127.0.0.1:9119/api/dashboard/plugins", timeout=8.0, token=token
+            )
+            if status != 200:
+                print(f"FAIL dashboard plugins: HTTP {status}")
+                failures += 1
+            else:
+                plugins = json.loads(body.decode("utf-8"))
+                names = [p.get("name") for p in plugins if isinstance(p, dict)]
+                if "kanban" not in names:
+                    print(f"FAIL dashboard plugins: kanban missing in {names}")
+                    failures += 1
+                else:
+                    print("OK dashboard plugins: kanban registered")
+
+            status, body = _http_get(
+                "http://127.0.0.1:9119/api/plugins/kanban/boards", timeout=8.0, token=token
+            )
+            if status == 200:
+                data = json.loads(body.decode("utf-8"))
+                boards = data.get("boards") or []
+                print(f"OK dashboard kanban boards: count={len(boards)}")
+            else:
+                print(f"FAIL dashboard kanban API: HTTP {status} {body[:200]!r}")
+                failures += 1
+        except Exception as exc:
+            print(f"FAIL dashboard kanban: {exc}")
+            failures += 1
+    else:
+        print("WARN dashboard kanban skipped (no session token)")
 
     if failures:
         print(f"FAILED ({failures} checks)")

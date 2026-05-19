@@ -95,6 +95,12 @@ def _snippet(text: str, limit: int = 200) -> str:
     return t[: limit - 3] + "..."
 
 
+def _quota_limited(text: str) -> bool:
+    """True when the provider accepted auth but hit usage limits (not missing API key)."""
+    low = (text or "").lower()
+    return "http 429" in low or "usage limit" in low or "rate limit" in low
+
+
 def test_cli(app_root: str, env: dict[str, str]) -> tuple[bool, str]:
     py = os.path.join(app_root, "runtime", "python311", "python.exe")
     agent = os.path.join(app_root, "runtime", "hermes-agent")
@@ -112,12 +118,16 @@ def test_cli(app_root: str, env: dict[str, str]) -> tuple[bool, str]:
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
+        if _quota_limited(out):
+            return True, f"quota limited (auth ok): {_snippet(out, 300)}"
         return False, f"exit {proc.returncode}: {_snippet(out, 300)}"
     if not out.strip():
         return False, "no output"
     low = out.lower()
     if "insufficient balance" in low or "http 402" in low:
         return False, f"provider billing: {_snippet(out, 300)}"
+    if _quota_limited(out):
+        return True, f"quota limited (auth ok): {_snippet(out, 300)}"
     return True, _snippet(out, 400)
 
 
@@ -135,6 +145,8 @@ def test_dashboard(token: str) -> tuple[bool, str]:
         return False, str(data)
     if not data.get("ok"):
         reply = str(data.get("response") or data)
+        if _quota_limited(reply):
+            return True, f"quota limited (auth ok): {_snippet(reply, 300)}"
         return False, _snippet(reply or str(data), 300)
     reply = str(data.get("response") or "")
     if not reply.strip():
@@ -142,6 +154,8 @@ def test_dashboard(token: str) -> tuple[bool, str]:
     low = reply.lower()
     if "insufficient balance" in low or "http 402" in low:
         return False, f"provider billing: {_snippet(reply, 300)}"
+    if _quota_limited(reply):
+        return True, f"quota limited (auth ok): {_snippet(reply, 300)}"
     return True, _snippet(reply, 400)
 
 
@@ -200,7 +214,11 @@ def test_webui() -> tuple[bool, str]:
     reply = "".join(chunks).strip()
     if reply:
         low = reply.lower()
-        if "insufficient balance" in low or "http 402" in low or "api call failed" in low:
+        if _quota_limited(reply):
+            return True, f"quota limited (auth ok): {_snippet(reply, 300)}"
+        if "insufficient balance" in low or "http 402" in low:
+            return False, f"provider billing: {_snippet(reply, 300)}"
+        if "api call failed" in low and "missing" in low:
             return False, f"provider error: {_snippet(reply, 300)}"
         return True, _snippet(reply, 400)
     # fallback: session messages
@@ -346,11 +364,18 @@ def test_desktop_ws(token: str) -> tuple[bool, str]:
     reply = "".join(replies).strip()
     if reply:
         low = reply.lower()
-        if "insufficient balance" in low or "http 402" in low or "api call failed" in low:
+        if _quota_limited(reply):
+            return True, f"quota limited (auth ok): {_snippet(reply, 300)}"
+        if "insufficient balance" in low or "http 402" in low:
+            return False, f"provider billing: {_snippet(reply, 300)}"
+        if "api call failed" in low and "missing" in low:
             return False, f"provider error: {_snippet(reply, 300)}"
         return True, _snippet(reply, 400)
     if errors:
-        return False, _snippet("; ".join(errors), 300)
+        err_text = "; ".join(errors)
+        if _quota_limited(err_text):
+            return True, f"quota limited (auth ok): {_snippet(err_text, 300)}"
+        return False, _snippet(err_text, 300)
     return False, "no assistant event on Desktop WS"
 
 

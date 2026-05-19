@@ -53,19 +53,18 @@ def main() -> int:
         return 3
     asset = artifacts[0]
 
-    tag = "v0.14.2-green-3ui-slim"
-    release_name = "HermesGo v0.14.2 green 3-UI slim"
-    body = """## HermesGo v0.14.2 green portable (three UIs)
+    tag = "v0.14.5-green-3ui-slim"
+    release_name = "HermesGo v0.14.5 green 3-UI slim"
+    body = """## HermesGo v0.14.5 green portable (three UIs)
 
 ### Fixes in this build
+- **Kanban**: WebUI `/api/kanban/*`, Dashboard `/api/plugins/kanban/*`, shared `kanban.db`, Desktop plugin assets
+- **Packaging**: `packaging_release.py` version sync, dist prune, post-sync hash verify
+- **Auto-update**: preserve `app/workspace` and `app/webui-data` (aligned with dev `packaging_sync`)
 - **Unified login**: Desktop remote mode uses Dashboard 9119 session token (`HERMES_DESKTOP_REMOTE_*`)
-- **Desktop API auth**: server accepts `X-Hermes-Session-Token` (Desktop) and `Authorization: Bearer` (browser)
-- **DesktopOnly + headless**: `-DesktopOnly` always launches Hermes.exe (CI headless no longer skips Desktop)
-- **Desktop logs**: `/api/logs?file=gui` maps to `desktop.log`
-- **HermesDesktop.bat**: runs `Start-HermesGo.ps1 -DesktopOnly` (portable auth/config, gateway + Dashboard first)
-- Codex provider test: no bogus `/v1/models` probe on `codex_responses`
-- First-run `auth.json` import from `%USERPROFILE%\\.hermes` when portable home is empty
-- Self-test: `smoke_portable_connect.py`, `smoke_portable_desktop.py`, `smoke_hello_all_ui.py`
+- **Desktop API auth**: `X-Hermes-Session-Token` + `Authorization: Bearer`
+- **Runtime version**: `hermes_cli` `__version__` matches release tag (`0.14.5`)
+- Self-test: `smoke_kanban_all_ui.py`, `smoke_portable_connect.py`, `smoke_hello_all_ui.py` (with API key)
 
 ### UIs
 - **HermesGo.exe** / **HermesGo.bat** — Dashboard + WebUI; optional `--menu`; auto-update from this repo

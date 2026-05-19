@@ -159,3 +159,37 @@ def ensure_codex_config_if_authed() -> bool:
         default_model=model_id,
     )
     return True
+
+
+def ensure_portable_deepseek_route() -> bool:
+    """HermesGo slim portable: always use DeepSeek (never auto-switch to Codex)."""
+    try:
+        from hermes_cli.auth import _update_config_for_provider
+        from hermes_cli.config import load_config
+    except Exception:
+        return False
+
+    cfg = load_config()
+    model_cfg = cfg.get("model")
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+
+    provider = str(model_cfg.get("provider") or "").strip()
+    default = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+    base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+    target_base = "https://api.deepseek.com/v1"
+    target_model = default if default.startswith("deepseek") else "deepseek-v4-flash"
+
+    if (
+        provider == "deepseek"
+        and default.startswith("deepseek")
+        and base_url.rstrip("/") == target_base
+    ):
+        return False
+
+    _update_config_for_provider(
+        "deepseek",
+        target_base,
+        default_model=target_model,
+    )
+    return True

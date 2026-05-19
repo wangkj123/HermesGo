@@ -56,6 +56,20 @@ function Resolve-HermesAppRoot {
     param([string]$ScriptRoot)
 
     $scriptRoot = Resolve-PortablePath -Path $ScriptRoot
+    # Green zip layout: HermesGo/app/runtime/python311 — prefer this over a dev
+    # mirror at HermesGo/runtime/python311 so home is always app/home.
+    $packageCandidates = @(
+        $scriptRoot,
+        (Resolve-PortablePath -Path (Join-Path $scriptRoot "..")),
+        (Resolve-PortablePath -Path (Join-Path $scriptRoot "..\.."))
+    )
+    foreach ($pkg in $packageCandidates) {
+        $appRoot = Join-Path $pkg "app"
+        if (Test-Path -LiteralPath (Join-Path $appRoot "runtime\python311\python.exe")) {
+            return $appRoot
+        }
+    }
+
     $candidates = @(
         $scriptRoot,
         (Resolve-PortablePath -Path (Join-Path $scriptRoot "..")),
@@ -66,12 +80,6 @@ function Resolve-HermesAppRoot {
         if (Test-Path -LiteralPath (Join-Path $candidate "runtime\python311\python.exe")) {
             return $candidate
         }
-    }
-
-    $packageRoot = Resolve-PortablePath -Path (Join-Path $scriptRoot "..")
-    $appRoot = Join-Path $packageRoot "app"
-    if (Test-Path -LiteralPath (Join-Path $appRoot "runtime\python311\python.exe")) {
-        return $appRoot
     }
 
     throw "Portable Python not found under $ScriptRoot (expected app\runtime\python311\python.exe)."
@@ -112,6 +120,7 @@ function Set-PortableProcessEnvironment {
     Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
 
     $env:PATH = Get-PortablePathList -AppRoot $AppRoot
+    $env:HERMES_PORTABLE_APP_ROOT = $AppRoot
     $env:HERMES_HOME = Join-Path $AppRoot "home"
     $env:OLLAMA_MODELS = Join-Path $AppRoot "data\ollama\models"
     $env:PYTHONUTF8 = "1"
@@ -764,29 +773,15 @@ function Test-CodexAuthExhausted {
 }
 
 function Apply-CloudPreferredRouteIfAvailable {
+    # Portable slim: DeepSeek only — Codex is not used (no quota / user preference).
     $deepseekKey = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
-    $provider = Get-ConfigModelProvider
-    $codexExhausted = Test-CodexAuthExhausted
-
-    if (-not [string]::IsNullOrWhiteSpace($deepseekKey)) {
-        if (Set-ConfigModelRoute -Provider "deepseek" -Model "deepseek-v4-flash" -BaseUrl "https://api.deepseek.com/v1") {
-            Write-LauncherLine "Cloud auto-route applied: deepseek/deepseek-v4-flash (DEEPSEEK_API_KEY)"
-        } else {
-            Write-LauncherLine "Cloud route already deepseek (DEEPSEEK_API_KEY present)"
-        }
-        return
+    if (Set-ConfigModelRoute -Provider "deepseek" -Model "deepseek-v4-flash" -BaseUrl "https://api.deepseek.com/v1") {
+        Write-LauncherLine "Cloud route: deepseek/deepseek-v4-flash (portable default; Codex disabled)"
+    } else {
+        Write-LauncherLine "Cloud route: deepseek (already configured; Codex disabled)"
     }
-
-    if ($codexExhausted -or $provider -eq "openai-codex") {
-        if (Set-ConfigModelRoute -Provider "deepseek" -Model "deepseek-v4-flash" -BaseUrl "https://api.deepseek.com/v1") {
-            Write-LauncherLine "Switched model route to deepseek (Codex exhausted or unavailable; set DEEPSEEK_API_KEY in app\home\.env)"
-        }
-        return
-    }
-
-    if ($provider -and $provider -ne "ollama") {
-        Write-LauncherLine "Cloud auto-route skipped: current provider is $provider"
-        return
+    if ([string]::IsNullOrWhiteSpace($deepseekKey)) {
+        Write-LauncherLine "WARNING: DEEPSEEK_API_KEY missing — paste key in app\home\.env or http://127.0.0.1:9119/env"
     }
 }
 
@@ -1256,6 +1251,7 @@ function Start-HermesDesktopProcess {
 
     $desktopEnv = @{
         HERMES_HOME                  = $homeDir
+        HERMES_PORTABLE_APP_ROOT     = $root
         HERMES_DESKTOP_HERMES_ROOT   = $runtimeDir
         HERMES_DESKTOP_PYTHON        = $pythonExe
         HERMES_DESKTOP_REMOTE_URL    = $dashboardBase
@@ -1460,11 +1456,9 @@ try {
         $bootstrap = @"
 import sys
 sys.path.insert(0, r'$agentRoot')
-from hermes_cli.portable_bootstrap import ensure_deepseek_config_if_key, ensure_codex_config_if_authed
-if ensure_deepseek_config_if_key():
-    print('Aligned config.yaml with DeepSeek (DEEPSEEK_API_KEY)')
-elif ensure_codex_config_if_authed():
-    print('Aligned config.yaml with OpenAI Codex OAuth')
+from hermes_cli.portable_bootstrap import ensure_portable_deepseek_route
+if ensure_portable_deepseek_route():
+    print('Aligned config.yaml with DeepSeek (portable; Codex not used)')
 "@
         $bootOut = & $pythonExe -c $bootstrap 2>&1
         foreach ($line in @($bootOut)) {
