@@ -53,18 +53,17 @@ def main() -> int:
         return 3
     asset = artifacts[0]
 
-    tag = "v0.14.5-green-3ui-slim"
-    release_name = "HermesGo v0.14.5 green 3-UI slim"
-    body = """## HermesGo v0.14.5 green portable (three UIs)
+    tag = "v0.14.7-green-3ui-slim"
+    release_name = "HermesGo v0.14.7 green 3-UI slim"
+    body = """## HermesGo v0.14.7 green portable (CLI + Dashboard + WebUI + Desktop)
 
 ### Fixes in this build
-- **Kanban**: WebUI `/api/kanban/*`, Dashboard `/api/plugins/kanban/*`, shared `kanban.db`, Desktop plugin assets
-- **Packaging**: `packaging_release.py` version sync, dist prune, post-sync hash verify
-- **Auto-update**: preserve `app/workspace` and `app/webui-data` (aligned with dev `packaging_sync`)
-- **Unified login**: Desktop remote mode uses Dashboard 9119 session token (`HERMES_DESKTOP_REMOTE_*`)
-- **Desktop API auth**: `X-Hermes-Session-Token` + `Authorization: Bearer`
-- **Runtime version**: `hermes_cli` `__version__` matches release tag (`0.14.5`)
-- Self-test: `smoke_kanban_all_ui.py`, `smoke_portable_connect.py`, `smoke_hello_all_ui.py` (with API key)
+- **Chat scroll**: Desktop `MNt` v3 (`kNt=48`, default unpinned, no stale scroll restore at bottom); WebUI unpinned near-bottom no longer jumps up
+- **Kanban**: Desktop-only still starts WebUI 8787; Dashboard `/api/kanban/*` proxy to WebUI; portable `kanban.db` sync
+- **Portable isolation**: `workspace/`, `webui-data/`, `HERMES_PORTABLE_*` — no host `.cursorrules` / dev repo paths
+- **Packaging/smoke**: root `Hermes*.bat` in zip; `HERMES_PORTABLE_APP_ROOT` in smokes; `patch_desktop_scroll.py` Windows `npx` fix
+- **Runtime version**: `hermes_cli` `__version__` = `0.14.7`
+- Self-test: `run_full_smoke_iter.ps1` (gateway, Kanban all UI, hello all UI, desktop verify)
 
 ### UIs
 - **HermesGo.exe** / **HermesGo.bat** — Dashboard + WebUI; optional `--menu`; auto-update from this repo

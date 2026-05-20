@@ -36,6 +36,7 @@ def _portable_env(app_root: str) -> dict[str, str]:
         parts.append(sys32)
     env = os.environ.copy()
     env["HERMES_HOME"] = home
+    env["HERMES_PORTABLE_APP_ROOT"] = os.path.normpath(app_root)
     env["PATH"] = os.pathsep.join(parts)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
@@ -101,6 +102,11 @@ def _quota_limited(text: str) -> bool:
     return "http 429" in low or "usage limit" in low or "rate limit" in low
 
 
+def _missing_api_key(text: str) -> bool:
+    low = (text or "").lower()
+    return "no api key was found" in low or "deepseek_api_key" in low
+
+
 def test_cli(app_root: str, env: dict[str, str]) -> tuple[bool, str]:
     py = os.path.join(app_root, "runtime", "python311", "python.exe")
     agent = os.path.join(app_root, "runtime", "hermes-agent")
@@ -118,6 +124,8 @@ def test_cli(app_root: str, env: dict[str, str]) -> tuple[bool, str]:
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
+        if _missing_api_key(out):
+            return False, f"missing API key (set app/home/.env): {_snippet(out, 200)}"
         if _quota_limited(out):
             return True, f"quota limited (auth ok): {_snippet(out, 300)}"
         return False, f"exit {proc.returncode}: {_snippet(out, 300)}"
@@ -233,6 +241,8 @@ def test_webui() -> tuple[bool, str]:
             if msg.get("role") == "assistant":
                 content = msg.get("content") or ""
                 if isinstance(content, str) and content.strip():
+                    if _missing_api_key(content):
+                        return False, f"missing API key: {_snippet(content, 200)}"
                     return True, _snippet(content, 400)
     return False, "no assistant text in stream or session"
 

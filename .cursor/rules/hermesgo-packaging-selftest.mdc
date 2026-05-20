@@ -232,6 +232,18 @@ Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`�
 - **正确做法**：Desktop-only 仍 `Start-WebUIProcess`；`web_server.py` 挂载 `/api/kanban/*` → `HERMES_WEBUI_URL`(8787) 代理；启动时 `kanban_db.init_db()` + `HERMES_HOME`/`HERMES_PORTABLE_APP_ROOT`
 - **涉及文件**：`Start-HermesGo.ps1`、`hermes_cli/web_server.py`
 
+### 2026-05-20 — 滚到底后仍被拉回中间（unpinned + nearBottom）
+- **现象**：用户停在底部看流式输出，消息增多后视口突然上跳；或 WebUI 在底部选字后 `scrollTop` 被旧快照恢复
+- **错误做法**：`groupCount` 变化时无条件恢复 `p.current`/`snapshot.top`；WebUI `_restoreMessageScrollSnapshot` 在 `!_scrollPinned` 时仍写回 `scrollTop`
+- **正确做法**：Desktop `MNt`：仅当 `scrollHeight-scrollTop-clientHeight > kNt` 时恢复；默认 `useRef(!1)` 不自动 re-pin；WebUI：unpinned 且 `snapshot.nearBottom` 时直接 `return` 不改 `scrollTop`；`kNt=48`
+- **涉及文件**：`patch_desktop_scroll.py`、`hermes-webui/static/ui.js`
+
+### 2026-05-20 — 冒烟/打包易踩坑（4 UI）
+- **现象**：`smoke_kanban_all_ui` 报 portable root=`E:\AI\hermes\HermesGo`；`build_zip_slim.py` 缺根目录 `.bat`；`patch_desktop_scroll.py` 报 `npx` 找不到；hello 冒烟无 key 却显示 webui OK
+- **错误做法**：冒烟不设 `HERMES_PORTABLE_APP_ROOT`；工作区无 `HermesGo/*.bat` 仍打包；子进程裸调 `npx`；把「无 API key」助手提示当成功
+- **正确做法**：`run_full_smoke_iter.ps1` 与各 smoke 设置 `HERMES_PORTABLE_APP_ROOT=$appRoot`；打包前 `git checkout -- HermesGo/Hermes*.bat`；patch 用 `shutil.which('npx')` + Windows `shell=True`；hello 需 `app/home/.env` 中 `DEEPSEEK_API_KEY` 或 Dashboard `/env`
+- **涉及文件**：`scripts/smoke_*.py`、`scripts/run_full_smoke_iter.ps1`、`build_zip_slim.py`
+
 ### 2026-05-19 — Desktop 聊天滚动乱跳（选文字后丢失位置）
 - **现象**：选中一段文字阅读，流式更新后视口跳到别处、选区丢失
 - **错误做法**：仅调 `kNt`；忽略 `getSelection()`；WebUI `_shouldFollowMessagesOnDomReplace` 用 `nearBottom(1200)`

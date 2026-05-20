@@ -122,7 +122,12 @@ $devHome = Join-Path $devHermes "app\home"
 foreach ($pair in @(@("auth.json", "auth.json"), @(".env", ".env"))) {
     $dst = Join-Path $homeDir $pair[1]
     if (Test-Path -LiteralPath $dst) { continue }
-    foreach ($srcRoot in @($profileHermes, $devHome)) {
+    foreach ($srcRoot in @(
+            $profileHermes,
+            $devHome,
+            (Join-Path $devHermes "home"),
+            (Join-Path $repoRoot "HermesGo-slim-v0147-smoke\HermesGo\app\home")
+        )) {
         $src = Join-Path $srcRoot $pair[0]
         if (Test-Path -LiteralPath $src) {
             Copy-Item -LiteralPath $src -Destination $dst -Force
@@ -138,13 +143,33 @@ foreach ($rel in @(
         "hermes_constants.py",
         "hermes_cli\web_server.py",
         "hermes_cli\kanban_db.py",
-        "hermes_cli\kanban.py"
+        "hermes_cli\kanban.py",
+        "hermes_cli\__init__.py",
+        "agent\prompt_builder.py",
+        "agent\subdirectory_hints.py",
+        "run_agent.py"
     )) {
     $src = Join-Path $devAgent $rel
     $dst = Join-Path $agentRoot $rel
     if (Test-Path -LiteralPath $src) {
+        New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
         Copy-Item -LiteralPath $src -Destination $dst -Force
     }
+}
+$devWebui = Join-Path $devHermes "runtime\hermes-webui\static"
+$appWebui = Join-Path $appRoot "runtime\hermes-webui\static"
+foreach ($name in @("ui.js", "panels.js")) {
+    $src = Join-Path $devWebui $name
+    if (Test-Path -LiteralPath $src) {
+        New-Item -ItemType Directory -Path $appWebui -Force | Out-Null
+        Copy-Item -LiteralPath $src -Destination (Join-Path $appWebui $name) -Force
+    }
+}
+$devAsar = Join-Path $devHermes "runtime\hermes-desktop\resources\app.asar"
+$appAsar = Join-Path $appRoot "runtime\hermes-desktop\resources\app.asar"
+if (Test-Path -LiteralPath $devAsar) {
+    New-Item -ItemType Directory -Path (Split-Path $appAsar -Parent) -Force | Out-Null
+    Copy-Item -LiteralPath $devAsar -Destination $appAsar -Force
 }
 
 if (-not $SkipLaunch) {
@@ -205,6 +230,7 @@ foreach ($smoke in $smokes) {
     Write-Host "=== RUN $($smoke.Name) ==="
     $env:HERMESGO_TEST_PACKAGE_ROOT = $pkgRoot
     $env:HERMESGO_TEST_APP_ROOT = $appRoot
+    $env:HERMES_PORTABLE_APP_ROOT = $appRoot
     $env:HERMESGO_VERIFY_DESKTOP_ONLY = "1"
     if ($smoke.Name -eq "check_dashboard_gateway") {
         $env:HERMES_RUNTIME_DIR = $agentRoot

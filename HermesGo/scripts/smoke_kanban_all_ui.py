@@ -259,6 +259,7 @@ def _test_path_consistency(app_root: str, failures: list[str], token: str | None
     print("\n=== Path consistency (HERMES_HOME vs UI display) ===")
     expected_home = os.path.normpath(os.path.join(app_root, "home"))
     os.environ["HERMES_HOME"] = expected_home
+    os.environ["HERMES_PORTABLE_APP_ROOT"] = os.path.normpath(app_root)
     agent = os.path.join(app_root, "runtime", "hermes-agent")
     if agent not in sys.path:
         sys.path.insert(0, agent)
