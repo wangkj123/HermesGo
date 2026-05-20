@@ -2895,6 +2895,129 @@ def _mount_plugin_api_routes():
 _mount_plugin_api_routes()
 
 
+def _webui_kanban_upstream_base() -> str:
+    """Loopback WebUI used by embedded Desktop/WebUI Kanban panels."""
+    return os.environ.get("HERMES_WEBUI_URL", "http://127.0.0.1:8787").rstrip("/")
+
+
+def _mount_webui_kanban_proxy() -> None:
+    """Proxy /api/kanban/* to the WebUI server (8787).
+
+    Hermes Desktop loads the WebUI panels from Dashboard (9119) but the
+    Kanban bridge only exists on the WebUI HTTP server. Desktop-only mode
+    starts WebUI in the background; this proxy lets same-origin fetches from
+    9119 succeed without duplicating the bridge on FastAPI.
+    """
+    try:
+        import httpx
+    except ImportError:
+        _log.warning("httpx unavailable; /api/kanban proxy not mounted")
+        return
+    from starlette.responses import Response, StreamingResponse
+
+    hop_by_hop = {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+        "content-length",
+    }
+
+    def _forward_headers(request: Request) -> dict[str, str]:
+        return {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in hop_by_hop
+        }
+
+    async def _proxy(request: Request, full_path: str = "") -> Response:
+        suffix = f"/{full_path}" if full_path else ""
+        upstream = f"{_webui_kanban_upstream_base()}/api/kanban{suffix}"
+        if request.url.query:
+            upstream = f"{upstream}?{request.url.query}"
+        headers = _forward_headers(request)
+        body = await request.body()
+
+        if request.method == "GET" and full_path == "events/stream":
+            async def _event_stream():
+                try:
+                    async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+                        async with client.stream(
+                            "GET", upstream, headers=headers
+                        ) as resp:
+                            async for chunk in resp.aiter_bytes():
+                                yield chunk
+                except httpx.HTTPError as exc:
+                    _log.warning("Kanban SSE proxy failed: %s", exc)
+                    msg = f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+                    yield msg.encode("utf-8")
+
+            return StreamingResponse(
+                _event_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache"},
+            )
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0), trust_env=False
+            ) as client:
+                resp = await client.request(
+                    request.method,
+                    upstream,
+                    headers=headers,
+                    content=body if body else None,
+                )
+        except httpx.HTTPError as exc:
+            _log.warning("Kanban API proxy failed for %s: %s", upstream, exc)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": (
+                        "Kanban WebUI backend unreachable on "
+                        f"{_webui_kanban_upstream_base()}. "
+                        "Ensure WebUI (8787) is running."
+                    ),
+                    "error": str(exc),
+                },
+            )
+
+        out_headers = {
+            k: v
+            for k, v in resp.headers.items()
+            if k.lower() not in hop_by_hop
+        }
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=out_headers,
+            media_type=resp.headers.get("content-type"),
+        )
+
+    app.add_api_route(
+        "/api/kanban",
+        _proxy,
+        methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    )
+    app.add_api_route(
+        "/api/kanban/{full_path:path}",
+        _proxy,
+        methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    )
+    _log.info(
+        "Mounted WebUI Kanban proxy: /api/kanban/* -> %s/api/kanban/*",
+        _webui_kanban_upstream_base(),
+    )
+
+
+_mount_webui_kanban_proxy()
+
+
 def _is_public_bind() -> bool:
     return getattr(app.state, "bound_host", "") in {"0.0.0.0", "::"}
 

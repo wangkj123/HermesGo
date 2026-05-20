@@ -1600,9 +1600,16 @@ class AIAgent:
             except Exception as _ce_err:
                 logger.debug("Context engine on_session_start: %s", _ce_err)
 
-        self._subdirectory_hints = SubdirectoryHintTracker(
-            working_dir=os.getenv("TERMINAL_CWD") or None,
-        )
+        hint_root = os.getenv("TERMINAL_CWD") or None
+        portable_ws = os.environ.get("HERMES_PORTABLE_WORKSPACE", "").strip()
+        portable_root = os.environ.get("HERMES_PORTABLE_APP_ROOT", "").strip()
+        if portable_ws and Path(portable_ws).is_dir():
+            hint_root = portable_ws
+        elif portable_root:
+            candidate = Path(portable_root) / "workspace"
+            if candidate.is_dir():
+                hint_root = str(candidate)
+        self._subdirectory_hints = SubdirectoryHintTracker(working_dir=hint_root)
         self._user_turn_count = 0
 
         # Cumulative token usage for the session

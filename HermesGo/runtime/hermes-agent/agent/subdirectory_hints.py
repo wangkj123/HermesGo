@@ -45,6 +45,29 @@ _COMMAND_TOOLS = {"terminal"}
 # Prevents scanning all the way to / for deeply nested paths.
 _MAX_ANCESTOR_WALK = 5
 
+
+def _portable_app_root() -> Optional[Path]:
+    raw = os.environ.get("HERMES_PORTABLE_APP_ROOT", "").strip()
+    if not raw:
+        return None
+    try:
+        return Path(raw).resolve()
+    except OSError:
+        return None
+
+
+def _within_portable_root(path: Path) -> bool:
+    """HermesGo green/USB builds must not load host-repo .cursorrules via tool paths."""
+    root = _portable_app_root()
+    if root is None:
+        return True
+    try:
+        path.resolve().relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 class SubdirectoryHintTracker:
     """Track which directories the agent visits and load hints on first access.
 
@@ -122,9 +145,13 @@ class SubdirectoryHintTracker:
             if not p.is_absolute():
                 p = self.working_dir / p
             p = p.resolve()
+            if not _within_portable_root(p):
+                return
             # Use parent if it's a file path (has extension or doesn't exist as dir)
             if p.suffix or (p.exists() and p.is_file()):
                 p = p.parent
+            if not _within_portable_root(p):
+                return
             # Walk up ancestors — stop at already-loaded or root
             for _ in range(_MAX_ANCESTOR_WALK):
                 if p in self._loaded_dirs:
@@ -159,6 +186,8 @@ class SubdirectoryHintTracker:
 
     def _is_valid_subdir(self, path: Path) -> bool:
         """Check if path is a valid directory to scan for hints."""
+        if not _within_portable_root(path):
+            return False
         try:
             if not path.is_dir():
                 return False

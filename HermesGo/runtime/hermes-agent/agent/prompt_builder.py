@@ -96,7 +96,15 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
     including) the git repository root.  Returns the first match, or
     ``None`` if nothing is found.
     """
-    stop_at = _find_git_root(cwd)
+    portable_raw = os.environ.get("HERMES_PORTABLE_APP_ROOT", "").strip()
+    stop_at = None
+    if portable_raw:
+        try:
+            stop_at = Path(portable_raw).resolve()
+        except OSError:
+            stop_at = None
+    if stop_at is None:
+        stop_at = _find_git_root(cwd)
     current = cwd.resolve()
 
     for directory in [current, *current.parents]:
@@ -1003,6 +1011,19 @@ def _load_cursorrules(cwd_path: Path) -> str:
     return _truncate_content(cursorrules_content, ".cursorrules")
 
 
+def _portable_context_cwd(cwd: Optional[str]) -> str:
+    """Pin startup context to the USB/app workspace, not the host dev repo."""
+    portable = os.environ.get("HERMES_PORTABLE_APP_ROOT", "").strip()
+    if portable:
+        ws = os.environ.get("HERMES_PORTABLE_WORKSPACE", "").strip()
+        if not ws:
+            ws = str(Path(portable) / "workspace")
+        if Path(ws).is_dir():
+            return ws
+        return portable
+    return cwd or os.getcwd()
+
+
 def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
     """Discover and load context files for the system prompt.
 
@@ -1018,10 +1039,7 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     When *skip_soul* is True, SOUL.md is not included here (it was already
     loaded via ``load_soul_md()`` for the identity slot).
     """
-    if cwd is None:
-        cwd = os.getcwd()
-
-    cwd_path = Path(cwd).resolve()
+    cwd_path = Path(_portable_context_cwd(cwd)).resolve()
     sections = []
 
     # Priority-based project context: first match wins

@@ -153,6 +153,74 @@ function Ensure-PortableAuthFromProfile {
     }
 }
 
+function Ensure-PortableLayout {
+    param([string]$AppRoot)
+
+    $workspaceDir = Join-Path $AppRoot "workspace"
+    $webuiDataDir = Join-Path $AppRoot "webui-data"
+    $desktopShellDir = Join-Path $AppRoot "home\desktop-shell"
+    foreach ($dir in @(
+            $workspaceDir,
+            $webuiDataDir,
+            $desktopShellDir,
+            (Join-Path $AppRoot "logs"),
+            (Join-Path $AppRoot "logs\tmp"),
+            (Join-Path $AppRoot "data"),
+            (Join-Path $AppRoot "data\ollama\models")
+        )) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+    }
+
+    $hermesMd = Join-Path $workspaceDir ".hermes.md"
+    if (-not (Test-Path -LiteralPath $hermesMd)) {
+        @"
+# HermesGo portable workspace
+
+All chat, files, and agent tools for this green/USB copy stay under this folder.
+Do not load project context from the host machine outside ``$AppRoot``.
+"@ | Set-Content -LiteralPath $hermesMd -Encoding utf8
+        Write-LauncherLine "Created portable workspace marker: $hermesMd"
+    }
+
+    $configPath = Join-Path $AppRoot "home\config.yaml"
+    if (Test-Path -LiteralPath $configPath) {
+        $configText = Get-Content -LiteralPath $configPath -Raw -Encoding utf8
+        $escapedWs = ($workspaceDir -replace '\\', '/')
+        if ($configText -match '(?m)^\s*cwd:\s*') {
+            $configText = [regex]::Replace(
+                $configText,
+                '(?m)^(\s*cwd:\s*).*$',
+                "`${1}`"$escapedWs`"",
+                1
+            )
+        } else {
+            $configText = $configText -replace '(?m)(^terminal:\s*\r?\n)', "`${1}  cwd: `"$escapedWs`"`r`n"
+        }
+        Set-Content -LiteralPath $configPath -Value $configText -Encoding utf8 -NoNewline
+    }
+
+    $env:HERMES_PORTABLE_APP_ROOT = $AppRoot
+    $env:HERMES_PORTABLE_WORKSPACE = $workspaceDir
+    $env:TERMINAL_CWD = $workspaceDir
+    $env:HERMES_DESKTOP_CWD = $workspaceDir
+    $env:HERMES_DESKTOP_USER_DATA_DIR = $desktopShellDir
+    $env:HERMES_WEBUI_STATE_DIR = $webuiDataDir
+    $env:HERMES_WEBUI_DEFAULT_WORKSPACE = $workspaceDir
+    $env:HERMES_WEBUI_URL = "http://127.0.0.1:8787"
+
+    Write-LauncherLine "Portable workspace: $workspaceDir"
+    Write-LauncherLine "Portable webui-data: $webuiDataDir"
+    Write-LauncherLine "Desktop shell data: $desktopShellDir"
+
+    return [pscustomobject]@{
+        WorkspaceDir = $workspaceDir
+        WebuiDataDir = $webuiDataDir
+        DesktopShellDir = $desktopShellDir
+    }
+}
+
 function Ensure-PortableHomeConfig {
     param([string]$AppRoot)
 
@@ -249,6 +317,8 @@ $pythonExe = Join-Path $root "runtime\python311\python.exe"
 $runtimeDir = Join-Path $root "runtime\hermes-agent"
 $runtimeBinDir = Join-Path $root "runtime\bin"
 $homeDir = Join-Path $root "home"
+$workspaceDir = Join-Path $root "workspace"
+$webuiDataDir = Join-Path $root "webui-data"
 $ollamaModelsDir = Join-Path $root "data\ollama\models"
 $tmpLogDir = Join-Path $root "logs\tmp"
 $debugLog = Join-Path $root "HermesGo-debug.txt"
@@ -862,6 +932,91 @@ raise SystemExit(0 if get_running_pid() else 1)
     return $LASTEXITCODE -eq 0
 }
 
+function Sync-PortableKanbanData {
+    param([string]$PythonExe, [string]$RuntimeDir, [string]$AppRoot, [string]$HomeDir)
+
+    # Dev tree may have both HermesGo/home (sessions) and HermesGo/app/home (zip
+    # layout smoke data). Kanban must live under the active HERMES_HOME.
+    $altHome = Join-Path $AppRoot "app\home"
+    if (-not (Test-Path -LiteralPath $altHome)) {
+        return
+    }
+
+    $sync = @"
+import os, shutil, sqlite3, sys
+from pathlib import Path
+
+sys.path.insert(0, r'$RuntimeDir')
+app_root = Path(r'$AppRoot')
+home = Path(r'$HomeDir')
+alt = Path(r'$altHome')
+
+def task_count(db: Path) -> int:
+    if not db.is_file() or db.stat().st_size == 0:
+        return 0
+    try:
+        conn = sqlite3.connect(db)
+        try:
+            return int(conn.execute('select count(*) from tasks').fetchone()[0])
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+dst_db = home / 'kanban.db'
+src_db = alt / 'kanban.db'
+dst_n = task_count(dst_db)
+src_n = task_count(src_db)
+if src_n <= 0 or dst_n > 0:
+    raise SystemExit(0)
+
+for rel in ('kanban.db', 'kanban'):
+    src = alt / rel
+    dst = home / rel
+    if not src.exists():
+        continue
+    if src.is_dir():
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+    else:
+        shutil.copy2(src, dst)
+print(f'kanban synced from app/home ({src_n} tasks) -> home')
+"@
+    try {
+        $out = & $PythonExe -c $sync 2>&1
+        foreach ($line in @($out)) {
+            if ($line) { Write-LauncherLine $line }
+        }
+    } catch {
+        Write-LauncherLine "WARNING: Kanban sync from app/home skipped: $($_.Exception.Message)"
+    }
+}
+
+function Ensure-KanbanDatabase {
+    param([string]$RuntimeDir, [string]$PythonExe, [string]$AppRoot, [string]$HomeDir)
+
+    Sync-PortableKanbanData -PythonExe $PythonExe -RuntimeDir $RuntimeDir -AppRoot $AppRoot -HomeDir $HomeDir
+
+    $bootstrap = @"
+import sys, os
+sys.path.insert(0, r'$RuntimeDir')
+os.environ['HERMES_HOME'] = r'$HomeDir'
+os.environ['HERMES_PORTABLE_APP_ROOT'] = r'$AppRoot'
+from hermes_cli import kanban_db as kb
+kb.init_db()
+print('kanban init ok')
+"@
+    try {
+        $out = & $PythonExe -c $bootstrap 2>&1
+        foreach ($line in @($out)) {
+            if ($line) { Write-LauncherLine $line }
+        }
+    } catch {
+        Write-LauncherLine "WARNING: Kanban DB init skipped: $($_.Exception.Message)"
+    }
+}
+
 function Start-GatewayProcess {
     if (Test-GatewayRunning) {
         Write-LauncherLine "Hermes gateway already running for profile: $homeDir"
@@ -880,12 +1035,15 @@ function Start-GatewayProcess {
 
     Remove-Item -LiteralPath $gatewayOutLog, $gatewayErrLog -Force -ErrorAction SilentlyContinue
     $gatewayEnv = @{
-        HERMES_HOME          = $homeDir
-        PATH                 = $env:PATH
-        PYTHONUTF8           = "1"
-        PYTHONIOENCODING     = "utf-8"
-        OLLAMA_MODELS        = $ollamaModelsDir
-        NO_PROXY             = $env:NO_PROXY
+        HERMES_HOME               = $homeDir
+        HERMES_PORTABLE_APP_ROOT  = $root
+        HERMES_PORTABLE_WORKSPACE = $workspaceDir
+        TERMINAL_CWD              = $workspaceDir
+        PATH                      = $env:PATH
+        PYTHONUTF8                = "1"
+        PYTHONIOENCODING          = "utf-8"
+        OLLAMA_MODELS             = $ollamaModelsDir
+        NO_PROXY                  = $env:NO_PROXY
     }
     $gatewayEnv = Add-PortableSecretEnv -Target $gatewayEnv
     $savedGatewayEnv = @{}
@@ -897,7 +1055,7 @@ function Start-GatewayProcess {
     try {
         $process = Start-Process -FilePath $pythonExe `
             -ArgumentList @("-m", "hermes_cli.main", "gateway", "run", "--replace", "--quiet") `
-            -WorkingDirectory $runtimeDir `
+            -WorkingDirectory $workspaceDir `
             -RedirectStandardOutput $gatewayOutLog `
             -RedirectStandardError $gatewayErrLog `
             -PassThru `
@@ -1046,6 +1204,9 @@ function Start-DashboardProcess {
         $savedDashEnv[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
     }
     $env:HERMES_HOME = $homeDir
+    $env:HERMES_PORTABLE_APP_ROOT = $root
+    $env:HERMES_PORTABLE_WORKSPACE = $workspaceDir
+    $env:TERMINAL_CWD = $workspaceDir
     $env:PYTHONUTF8 = "1"
     $env:PYTHONIOENCODING = "utf-8"
     $env:HERMES_DASHBOARD_TUI = "1"
@@ -1056,7 +1217,7 @@ function Start-DashboardProcess {
     try {
         $process = Start-Process -FilePath $pythonExe `
             -ArgumentList @("-m", "hermes_cli.main", "dashboard", "--host", "127.0.0.1", "--port", "9119", "--no-open", "--tui") `
-            -WorkingDirectory $runtimeDir `
+            -WorkingDirectory $workspaceDir `
             -RedirectStandardOutput $dashboardOutLog `
             -RedirectStandardError $dashboardErrLog `
             -PassThru `
@@ -1252,6 +1413,10 @@ function Start-HermesDesktopProcess {
     $desktopEnv = @{
         HERMES_HOME                  = $homeDir
         HERMES_PORTABLE_APP_ROOT     = $root
+        HERMES_PORTABLE_WORKSPACE    = $workspaceDir
+        TERMINAL_CWD                 = $workspaceDir
+        HERMES_DESKTOP_CWD           = $workspaceDir
+        HERMES_DESKTOP_USER_DATA_DIR = (Join-Path $homeDir "desktop-shell")
         HERMES_DESKTOP_HERMES_ROOT   = $runtimeDir
         HERMES_DESKTOP_PYTHON        = $pythonExe
         HERMES_DESKTOP_REMOTE_URL    = $dashboardBase
@@ -1442,6 +1607,8 @@ try {
     Apply-ProxyBypassEnvironment
     Ensure-PortableAuthFromProfile -AppRoot $root
     Ensure-PortableHomeConfig -AppRoot $root
+    $portableLayout = Ensure-PortableLayout -AppRoot $root
+    $workspaceDir = $portableLayout.WorkspaceDir
     Ensure-PortableDeepSeekEnvTemplate
     Merge-PortableEnvFromKnownSources
     Import-PortableDotEnv
@@ -1472,10 +1639,12 @@ if ensure_portable_deepseek_route():
     Apply-CloudPreferredRouteIfAvailable
 
     Start-GatewayProcess
+    Ensure-KanbanDatabase -RuntimeDir $runtimeDir -PythonExe $pythonExe -AppRoot $root -HomeDir $homeDir
 
     if ($DesktopOnly) {
-        Write-LauncherLine "Desktop-only mode: skip WebUI (8787); start Dashboard (9119) after gateway, then Desktop."
+        Write-LauncherLine "Desktop-only mode: Dashboard (9119) + WebUI backend (8787, Kanban API) + Desktop."
         Start-DashboardProcess
+        Start-WebUIProcess
         if (-not $headless -and -not $NoOpenBrowser) {
             Open-DashboardBrowser -Url $dashboardBrowserUrl
         }

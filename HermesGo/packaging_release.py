@@ -7,7 +7,7 @@ import re
 import zipfile
 
 # Single source of truth for slim green builds (keep in sync with GitHub release tag).
-SLIM_VERSION = "0.14.5"
+SLIM_VERSION = "0.14.6"
 RELEASE_SUFFIX = "green-3ui-slim"
 RELEASE_TAG = f"v{SLIM_VERSION}-{RELEASE_SUFFIX}"
 

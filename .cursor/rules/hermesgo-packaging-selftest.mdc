@@ -219,3 +219,27 @@ Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`�
 - **错误做法**：只信 Dashboard 进程内 `os.environ`；让 `load_pool` 在 env 空时 prune 掉 `auth.json` 里 `env:DEEPSEEK_API_KEY` 条目；无 key 时仍用 `no-key-required` 调 API
 - **正确做法**：`credential_pool._prune_stale_seeded_entries` 保留仍含可用 `access_token` 的 env 种子条目；`_resolve_api_key_provider_secret` 读 `get_env_value` + credential pool；`run_agent` 对 `api_key` provider 无 key 时 fail-fast；`env_loader` 不把空 `*_API_KEY=` 写入进程环境；Dashboard 保存密钥后确认 `app/home/.env` 非空
 - **涉及文件**：`agent/credential_pool.py`、`hermes_cli/auth.py`、`hermes_cli/env_loader.py`、`run_agent.py`
+
+### 2026-05-19 — Kanban 能打开但没有任何卡片（no data）
+- **现象**：Kanban 面板空白、各列为 Empty；API 200 但 `tasks` 为空
+- **错误做法**：以为是 Dashboard 插件坏了；在 dev 树只用 `HermesGo/home/kanban.db` 而数据在 `HermesGo/app/home/kanban.db`
+- **正确做法**：`HERMES_HOME` 指向当前活跃的 `home/`（dev=`HermesGo/home`，zip=`app/home`）；启动器 `Sync-PortableKanbanData` 在 home 无任务且 `app/home` 有库时复制 `kanban.db`；新任务用面板「+」或 Dashboard `/kanban` 插件创建
+- **涉及文件**：`Start-HermesGo.ps1`、`home/kanban.db`
+
+### 2026-05-19 — Desktop 模式 Kanban「Failed to fetch」
+- **现象**：绿色版 Desktop-only 打开 Kanban 显示 `Kanban unavailable: Failed to fetch`；8787 未监听
+- **错误做法**：只起 Dashboard(9119) 不起 WebUI(8787)；在 9119 上直接提供 `/api/kanban`（仅 WebUI 有 `kanban_bridge`）
+- **正确做法**：Desktop-only 仍 `Start-WebUIProcess`；`web_server.py` 挂载 `/api/kanban/*` → `HERMES_WEBUI_URL`(8787) 代理；启动时 `kanban_db.init_db()` + `HERMES_HOME`/`HERMES_PORTABLE_APP_ROOT`
+- **涉及文件**：`Start-HermesGo.ps1`、`hermes_cli/web_server.py`
+
+### 2026-05-19 — Desktop 聊天滚动乱跳（选文字后丢失位置）
+- **现象**：选中一段文字阅读，流式更新后视口跳到别处、选区丢失
+- **错误做法**：仅调 `kNt`；忽略 `getSelection()`；WebUI `_shouldFollowMessagesOnDomReplace` 用 `nearBottom(1200)`
+- **正确做法**：Desktop `MNt`：有选区/指针按下时 `f.current` 锁读、禁止 `g()`/`ResizeObserver` 改 scrollTop；`groupCount` 变化时非 pinned 恢复 `scrollTop`；WebUI：`_hasMessagePaneTextSelection` + `#messages` pointerdown 锁读；`npx @electron/asar pack` 后重启 Desktop
+- **涉及文件**：`hermes-webui/static/ui.js`、`HermesGo/runtime/hermes-desktop/resources/app.asar`
+
+### 2026-05-19 — 绿色版把主机 Cursor/开发仓库内容带进 Desktop
+- **现象**：U 盘绿色版聊天里出现 `E:\AI\.cursorrules` 或本机 Hermes 开发仓库上下文；数据似乎不在 U 盘
+- **错误做法**：gateway/dashboard `WorkingDirectory=runtime/hermes-agent`；工具扫 `E:\AI\hermes` 时 `subdirectory_hints` 仍加载主机 `.cursorrules`；`terminal.cwd: .` 相对开发机目录
+- **正确做法**：`Ensure-PortableLayout` 创建 `workspace/`、`webui-data/`、`home/desktop-shell/`，把 `terminal.cwd` 写成绝对 `app/workspace`；导出 `HERMES_PORTABLE_*`、`TERMINAL_CWD`、`HERMES_DESKTOP_USER_DATA_DIR`；`subdirectory_hints._within_portable_root` + `prompt_builder._portable_context_cwd` 限制在 `HERMES_PORTABLE_APP_ROOT` 内
+- **涉及文件**：`Start-HermesGo.ps1`、`agent/subdirectory_hints.py`、`agent/prompt_builder.py`、`run_agent.py`
