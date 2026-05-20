@@ -167,6 +167,16 @@ def main() -> int:
         print(f"ERROR: runtime version {runtime_ver!r} != build {VERSION!r}")
         return 1
 
+    patch_script = os.path.join(SCRIPT_DIR, "scripts", "patch_desktop_scroll.py")
+    if os.path.isfile(patch_script):
+        import subprocess
+
+        print("Patching desktop scroll (MNt v4) before zip...")
+        rc = subprocess.call([sys.executable, patch_script], cwd=SCRIPT_DIR)
+        if rc != 0:
+            print("ERROR: patch_desktop_scroll.py failed")
+            return rc
+
     ps1_path = os.path.join(SCRIPT_DIR, "Start-HermesGo.ps1")
     with open(ps1_path, "r", encoding="utf-8") as f:
         ps1_fixed = f.read()

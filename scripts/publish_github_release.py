@@ -54,16 +54,18 @@ def main() -> int:
     asset = artifacts[0]
 
     stable_asset_name = "HermesGo-green-3ui-slim.zip"
-    tag = "v0.14.8-green-3ui-slim"
-    release_name = "HermesGo v0.14.8 green 3-UI slim"
-    body = """## HermesGo v0.14.8 green portable (CLI + Dashboard + WebUI + Desktop)
+    tag = "v0.14.9-green-3ui-slim"
+    release_name = "HermesGo v0.14.9 green 3-UI slim"
+    body = """## HermesGo v0.14.9 green portable (CLI + Dashboard + WebUI + Desktop)
 
 ### Fixes in this build
-- **EXE auto-update**: interactive launch always shows confirm dialog (立即更新 / 稍后); menu「更新」also confirms before download; not forced every launch
+- **Desktop scroll v4**: MNt patch removes ResizeObserver/groupCount scroll restore; pinned follow uses `virtualizer.scrollToIndex`; patches `runtime/` and `app/runtime/` asar; runs before `build_zip_slim.py`
+- **Desktop white screen**: fix `patch_desktop_scroll.py` ResizeObserver typo (`r.observe` → `i.observe`) that crashed the chat UI on mount
+- **EXE auto-update**: version check then download; writes `app/logs/update-preview.txt` with [新增]/[覆盖] file list; dialog **立即更新 / 跳过 / 取消** before overwrite; preserves home/data/logs/workspace/webui-data
 - **README version**: `Current release tag` stamped at build time (matches `hermes_cli` __version__)
 - **Release asset**: stable download name `HermesGo-green-3ui-slim.zip` plus dated zip on GitHub
 - **Chat scroll** (from v0.14.7): Desktop/WebUI bottom scroll stability; Kanban + portable isolation
-- **Runtime version**: `hermes_cli` `__version__` = `0.14.8`
+- **Runtime version**: `hermes_cli` `__version__` = `0.14.9`
 - Self-test: `run_full_smoke_iter.ps1` (all smokes passed)
 
 ### UIs

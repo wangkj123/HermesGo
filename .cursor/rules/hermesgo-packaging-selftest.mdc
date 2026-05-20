@@ -238,6 +238,30 @@ Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`�
 - **正确做法**：Desktop `MNt`：仅当 `scrollHeight-scrollTop-clientHeight > kNt` 时恢复；默认 `useRef(!1)` 不自动 re-pin；WebUI：unpinned 且 `snapshot.nearBottom` 时直接 `return` 不改 `scrollTop`；`kNt=48`
 - **涉及文件**：`patch_desktop_scroll.py`、`hermes-webui/static/ui.js`
 
+### 2026-05-20 — EXE 更新须先出文件列表再确认
+- **现象**：用户要求更新前看到将改哪些文件，并能确认/跳过/取消；仅「立即更新/稍后」两按钮不够
+- **错误做法**：`ApplyReleaseUpdateAsync` 下载后直接 `ApplyUpdate`；启动时 `ShowPrimaryDeferPrompt` 在下载前问一句
+- **正确做法**：解包后 `BuildUpdatePlan` → 写入 `app/logs/update-preview.txt` → 三按钮对话框（立即更新/跳过/取消）；`UpdateResult.UserDeclined` 区分失败与用户拒绝
+- **涉及文件**：`create_hermes_go/HermesGoBootstrap.cs`
+
+### 2026-05-20 — Desktop 补丁打在错路径（test 仍用旧 asar）
+- **现象**：dev 已 v4 但 `HermesGo-slim-test-v014` Desktop 仍跳；`packaging_sync` 后照旧
+- **错误做法**：只 patch `HermesGo/runtime/.../app.asar`；打包 zip 实际在 `HermesGo/app/runtime/...`；未在 `build_zip_slim.py` 前跑补丁
+- **正确做法**：`patch_desktop_scroll.py` 同时处理 `runtime/` 与 `app/runtime/`；打包前必跑；测试树可传 asar 路径参数；sync 后若 zip 未含 v4 需重打 zip 或单独 patch 测试树 asar
+- **涉及文件**：`HermesGo/scripts/patch_desktop_scroll.py`、`HermesGo/build_zip_slim.py`
+
+### 2026-05-20 — Desktop 聊天仍来回跳（虚拟列表 + 补丁策略）
+- **现象**：流式输出时视口上下抖；中间阅读被拽动；与 WebUI 表现不一致
+- **错误做法**：在压缩 bundle 里保留 `ResizeObserver→scrollTop=scrollHeight` + `groupCount` 变化时恢复旧 `scrollTop`（与 TanStack Virtual `TNt` 量测冲突）；用正则补丁迭代 `kNt` 但不改跟底机制
+- **正确做法**：MNt v4 去掉 ResizeObserver 跟底与 groupCount 回滚；仅在 **用户 pinned** 时用 `requestAnimationFrame` + `virtualizer.scrollToIndex(last,{align:end})` 跟底；长期应在 `apps/desktop` 源码修并 `build_hermes_desktop_portable.ps1` 重打包，勿只改 asar
+- **涉及文件**：`HermesGo/scripts/patch_desktop_scroll.py`
+
+### 2026-05-20 — Desktop 白屏（MNt 补丁 ResizeObserver 笔误）
+- **现象**：Hermes Desktop 窗口空白；`desktop.log` 仅显示 remote backend ready
+- **错误做法**：`patch_desktop_scroll.py` 写成 `t.firstElementChild&&r.observe(...)`（`r` 是 `requestAnimationFrame` 句柄）
+- **正确做法**：应为 `i.observe(t.firstElementChild)`；补丁脚本在已打过补丁时须检测 `i.observe` 再跳过；修后重跑 `patch_desktop_scroll.py` 并同步 `app.asar`
+- **涉及文件**：`HermesGo/scripts/patch_desktop_scroll.py`、`runtime/hermes-desktop/resources/app.asar`
+
 ### 2026-05-20 — EXE 不提示升级 / README 版本过旧
 - **现象**：`HermesGo.exe` 不弹更新；`README.txt` 仍写 v0.14.4 但 `__init__.py` 已是 0.14.7；GitHub 只有带日期 zip 名
 - **错误做法**：只改 runtime `__version__` 不 stamp README；`HERMESGO_AUTO_UPDATE_PROMPT=0` 时静默直接覆盖；Release 只上传 `HermesGo-YYYY...zip` 无 `HermesGo-green-3ui-slim.zip`

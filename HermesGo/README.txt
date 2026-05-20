@@ -1,8 +1,8 @@
-HermesGo green portable package (v0.14.8, three UIs)
-HermesGo 绿色便携包（v0.14.8，三套界面）
+HermesGo green portable package (v0.14.9, three UIs)
+HermesGo 绿色便携包（v0.14.9，三套界面）
 
-Current release tag: v0.14.8-green-3ui-slim
-当前发行标签：v0.14.8-green-3ui-slim
+Current release tag: v0.14.9-green-3ui-slim
+当前发行标签：v0.14.9-green-3ui-slim
 
 Latest releases: https://github.com/wangkj123/HermesGo/releases/latest
 最新发布页：https://github.com/wangkj123/HermesGo/releases/latest

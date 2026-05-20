@@ -80,6 +80,8 @@ internal sealed class HermesBootstrap
     private const string UpdateVersionEnv = "HERMESGO_UPDATE_VERSION";
     private const string UpdateSourcesEnv = "HERMESGO_UPDATE_SOURCES";
     private const string UpdateTimeoutEnv = "HERMESGO_UPDATE_TIMEOUT_SEC";
+    private const string UpdatePreviewListFileName = "update-preview.txt";
+    private const int UpdatePreviewDialogMaxLines = 200;
     private const string UseProxyEnv = "HERMESGO_UPDATE_USE_PROXY";
     private const byte VkControl = 0x11;
     private const byte VkShift = 0x10;
@@ -270,7 +272,7 @@ internal sealed class HermesBootstrap
             {
                 Log("auto update before launch (silent)");
                 var silentResult = await ApplyReleaseUpdateAsync(release).ConfigureAwait(false);
-                if (!silentResult.Success)
+                if (!silentResult.Success && !silentResult.UserDeclined)
                 {
                     Log("auto update before launch failed: " + silentResult.Message);
                 }
@@ -278,20 +280,14 @@ internal sealed class HermesBootstrap
                 return;
             }
 
-            var prompt = string.Format(
-                CultureInfo.InvariantCulture,
-                "当前版本：{0}{1}发现新版本：{2}{1}{1}是否现在下载并覆盖程序文件？{1}会保留 home、data、logs、workspace、webui-data。{1}{1}选择“稍后”将直接启动当前版本（不会自动升级）。",
-                currentVersionText,
-                Environment.NewLine,
-                targetText);
-            if (!ShowPrimaryDeferPrompt("HermesGo 软件更新", prompt, "立即更新", "稍后"))
+            Log("auto update before launch (interactive, download then file-list confirm)");
+            var result = await ApplyReleaseUpdateAsync(release).ConfigureAwait(false);
+            if (result.UserDeclined)
             {
-                Log("auto update deferred by user");
+                Log("auto update before launch declined: " + result.Message);
                 return;
             }
 
-            Log("auto update before launch (interactive, confirmed)");
-            var result = await ApplyReleaseUpdateAsync(release).ConfigureAwait(false);
             if (!result.Success)
             {
                 Log("auto update before launch failed: " + result.Message);
@@ -554,6 +550,130 @@ internal sealed class HermesBootstrap
             form.CancelButton = deferButton;
 
             return form.ShowDialog() == DialogResult.OK;
+        }
+    }
+
+    private enum UpdatePromptChoice
+    {
+        Confirm,
+        Skip,
+        Cancel,
+    }
+
+    private static UpdatePromptChoice ShowUpdateConfirmDialog(
+        string title,
+        string headerText,
+        IReadOnlyList<string> previewLines,
+        string listFilePath)
+    {
+        using (var form = new Form())
+        {
+            form.Text = title;
+            form.StartPosition = FormStartPosition.CenterScreen;
+            form.FormBorderStyle = FormBorderStyle.Sizable;
+            form.MaximizeBox = true;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.ClientSize = new Size(580, 500);
+            form.Font = SystemFonts.MessageBoxFont;
+            form.MinimumSize = new Size(480, 360);
+
+            var headerLabel = new Label
+            {
+                AutoSize = false,
+                Dock = DockStyle.Top,
+                Height = 88,
+                Padding = new Padding(12, 10, 12, 0),
+                Text = headerText ?? string.Empty,
+            };
+
+            var pathLabel = new Label
+            {
+                AutoSize = false,
+                Dock = DockStyle.Bottom,
+                Height = 40,
+                Padding = new Padding(12, 4, 12, 8),
+                Text = "完整变更列表文件：" + (listFilePath ?? string.Empty),
+            };
+
+            var listBox = new ListBox
+            {
+                Dock = DockStyle.Fill,
+                Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 9f),
+                HorizontalScrollbar = true,
+                IntegralHeight = false,
+            };
+
+            if (previewLines != null)
+            {
+                var shown = Math.Min(previewLines.Count, UpdatePreviewDialogMaxLines);
+                for (var index = 0; index < shown; index++)
+                {
+                    listBox.Items.Add(previewLines[index]);
+                }
+
+                if (previewLines.Count > shown)
+                {
+                    listBox.Items.Add("... 另有 " + (previewLines.Count - shown).ToString(CultureInfo.InvariantCulture) + " 项，请打开上方列表文件查看");
+                }
+            }
+
+            var buttons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 52,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false,
+                Padding = new Padding(0, 8, 14, 10),
+            };
+
+            var confirmButton = new Button
+            {
+                Text = "立即更新",
+                Width = 112,
+                Height = 30,
+                DialogResult = DialogResult.OK,
+                Margin = new Padding(8, 0, 0, 0),
+            };
+            var skipButton = new Button
+            {
+                Text = "跳过",
+                Width = 88,
+                Height = 30,
+                DialogResult = DialogResult.Ignore,
+                Margin = new Padding(8, 0, 0, 0),
+            };
+            var cancelButton = new Button
+            {
+                Text = "取消",
+                Width = 88,
+                Height = 30,
+                DialogResult = DialogResult.Cancel,
+                Margin = new Padding(8, 0, 0, 0),
+            };
+
+            buttons.Controls.Add(confirmButton);
+            buttons.Controls.Add(skipButton);
+            buttons.Controls.Add(cancelButton);
+            form.Controls.Add(listBox);
+            form.Controls.Add(pathLabel);
+            form.Controls.Add(headerLabel);
+            form.Controls.Add(buttons);
+            form.AcceptButton = confirmButton;
+            form.CancelButton = cancelButton;
+
+            var dialogResult = form.ShowDialog();
+            if (dialogResult == DialogResult.OK)
+            {
+                return UpdatePromptChoice.Confirm;
+            }
+
+            if (dialogResult == DialogResult.Ignore)
+            {
+                return UpdatePromptChoice.Skip;
+            }
+
+            return UpdatePromptChoice.Cancel;
         }
     }
 
@@ -863,6 +983,35 @@ internal sealed class HermesBootstrap
             return UpdateResult.Failed("下载的 HermesGo 便携包结构校验失败，未覆盖当前文件。");
         }
 
+        ReportUpdateProgress(progressReporter, "正在统计将更新的文件...");
+        var localVersion = GetLocalVersion();
+        var plan = BuildUpdatePlan(extractedRoot);
+        if (plan.Items.Count == 0)
+        {
+            CleanupTempArtifacts();
+            Log("update plan empty; nothing to apply");
+            return UpdateResult.Failed("更新包中没有需要覆盖的文件（可能已是最新）。");
+        }
+
+        WriteUpdatePlanFile(plan, targetRelease, localVersion);
+
+        if (ShouldPromptInteractiveUpdate())
+        {
+            var choice = PromptForReleaseUpdate(targetRelease, plan, localVersion);
+            if (choice != UpdatePromptChoice.Confirm)
+            {
+                CleanupTempArtifacts();
+                if (choice == UpdatePromptChoice.Skip)
+                {
+                    Log("update skipped by user after preview");
+                    return UpdateResult.Declined("已跳过本次更新，继续使用当前版本。", cancelled: false);
+                }
+
+                Log("update cancelled by user after preview");
+                return UpdateResult.Declined("已取消更新。", cancelled: true);
+            }
+        }
+
         ReportUpdateProgress(progressReporter, "正在停止 Hermes 相关进程...");
         StopPortableHermesProcessesBeforeUpdate();
         ReportUpdateProgress(progressReporter, "正在覆盖 HermesGo 便携包文件...");
@@ -870,7 +1019,14 @@ internal sealed class HermesBootstrap
         ReportUpdateProgress(progressReporter, "正在清理临时文件...");
         CleanupTempArtifacts();
         Log("package update applied from " + result.SourceLabel + " (" + result.Md5 + ")");
-        var summaryText = "便携包已更新到 " + targetRelease.TagName + "。";
+        var summaryText = string.Format(
+            CultureInfo.InvariantCulture,
+            "便携包已更新到 {0}。覆盖 {1} 个文件（新增 {2}，覆盖 {3}）。列表：{4}",
+            targetRelease.TagName,
+            plan.Items.Count,
+            plan.AddCount,
+            plan.UpdateCount,
+            plan.ListFilePath ?? UpdatePreviewListFileName);
         return UpdateResult.Successful(result.SourceLabel, result.Md5, result.Bytes, summaryText);
     }
 
@@ -1767,6 +1923,25 @@ internal sealed class HermesBootstrap
         return required.All(File.Exists);
     }
 
+    private sealed class UpdatePlanItem
+    {
+        public string RelativePath { get; set; }
+        public string Action { get; set; }
+    }
+
+    private sealed class UpdatePlan
+    {
+        public List<UpdatePlanItem> Items { get; private set; }
+        public int AddCount { get; set; }
+        public int UpdateCount { get; set; }
+        public string ListFilePath { get; set; }
+
+        public UpdatePlan()
+        {
+            Items = new List<UpdatePlanItem>();
+        }
+    }
+
     private sealed class UpdateSummary
     {
         public int CopiedFiles { get; set; }
@@ -1927,13 +2102,13 @@ internal sealed class HermesBootstrap
         Thread.Sleep(1500);
     }
 
-    private void ApplyUpdate(string extractedRoot)
+    private HashSet<string> BuildPreserveRoots(string extractedRoot)
     {
         var extractedContentRoot = ResolvePackageContentRoot(extractedRoot);
         var contentPrefix = GetRelativePath(extractedRoot, extractedContentRoot)
             .Replace('\\', '/')
             .Trim('/');
-        var preserveRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             string.IsNullOrEmpty(contentPrefix) ? "home" : contentPrefix + "/home",
             string.IsNullOrEmpty(contentPrefix) ? "data" : contentPrefix + "/data",
@@ -1941,6 +2116,131 @@ internal sealed class HermesBootstrap
             string.IsNullOrEmpty(contentPrefix) ? "workspace" : contentPrefix + "/workspace",
             string.IsNullOrEmpty(contentPrefix) ? "webui-data" : contentPrefix + "/webui-data",
         };
+    }
+
+    private UpdatePlan BuildUpdatePlan(string extractedRoot)
+    {
+        var preserveRoots = BuildPreserveRoots(extractedRoot);
+        var plan = new UpdatePlan();
+        foreach (var file in Directory.GetFiles(extractedRoot, "*", SearchOption.AllDirectories))
+        {
+            var relative = GetRelativePath(extractedRoot, file);
+            if (ShouldSkipPath(relative, preserveRoots) || IsSelfExe(relative))
+            {
+                continue;
+            }
+
+            var normalized = relative.Replace('\\', '/');
+            var destination = Path.Combine(_root, relative);
+            var item = new UpdatePlanItem
+            {
+                RelativePath = normalized,
+                Action = File.Exists(destination) ? "update" : "add",
+            };
+            plan.Items.Add(item);
+            if (item.Action == "add")
+            {
+                plan.AddCount++;
+            }
+            else
+            {
+                plan.UpdateCount++;
+            }
+        }
+
+        plan.Items.Sort(
+            (left, right) => string.Compare(left.RelativePath, right.RelativePath, StringComparison.OrdinalIgnoreCase));
+        return plan;
+    }
+
+    private string WriteUpdatePlanFile(UpdatePlan plan, ReleaseInfo targetRelease, Version localVersion)
+    {
+        var logsDir = Path.Combine(_contentRoot, "logs");
+        Directory.CreateDirectory(logsDir);
+        var listPath = Path.Combine(logsDir, UpdatePreviewListFileName);
+        var localText = localVersion != null ? localVersion.ToString() : "unknown";
+        var targetText = targetRelease != null
+            ? (targetRelease.AgentVersion != null
+                ? targetRelease.AgentVersion.ToString()
+                : (!string.IsNullOrWhiteSpace(targetRelease.DisplayName)
+                    ? targetRelease.DisplayName
+                    : targetRelease.TagName))
+            : "unknown";
+        var lines = new List<string>
+        {
+            "# HermesGo update preview",
+            "# Generated: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            "# Current: " + localText,
+            "# Target: " + targetText,
+            "# Total: " + plan.Items.Count.ToString(CultureInfo.InvariantCulture) +
+            " (new=" + plan.AddCount.ToString(CultureInfo.InvariantCulture) +
+            ", overwrite=" + plan.UpdateCount.ToString(CultureInfo.InvariantCulture) + ")",
+            "# Preserved: home, data, logs, workspace, webui-data (not listed)",
+            "# Skipped: HermesGo.exe (update launcher separately)",
+            string.Empty,
+        };
+
+        foreach (var item in plan.Items)
+        {
+            var tag = item.Action == "add" ? "[新增]" : "[覆盖]";
+            lines.Add(tag + " " + item.RelativePath);
+        }
+
+        File.WriteAllLines(listPath, lines.ToArray(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        plan.ListFilePath = listPath;
+        Log("update preview list written: " + listPath + " items=" + plan.Items.Count.ToString(CultureInfo.InvariantCulture));
+        return listPath;
+    }
+
+    private static List<string> BuildUpdatePreviewDialogLines(UpdatePlan plan)
+    {
+        var lines = new List<string>();
+        if (plan == null || plan.Items == null)
+        {
+            return lines;
+        }
+
+        foreach (var item in plan.Items)
+        {
+            var tag = item.Action == "add" ? "[新增]" : "[覆盖]";
+            lines.Add(tag + " " + item.RelativePath);
+        }
+
+        return lines;
+    }
+
+    private bool ShouldPromptInteractiveUpdate()
+    {
+        return Environment.UserInteractive &&
+               !ReadBoolEnv(AutoUpdateSilentEnv, defaultValue: false) &&
+               ReadBoolEnv(AutoUpdatePromptEnv, defaultValue: true);
+    }
+
+    private UpdatePromptChoice PromptForReleaseUpdate(ReleaseInfo targetRelease, UpdatePlan plan, Version localVersion)
+    {
+        var localText = localVersion != null ? localVersion.ToString() : "unknown";
+        var targetText = targetRelease.AgentVersion != null
+            ? targetRelease.AgentVersion.ToString()
+            : (!string.IsNullOrWhiteSpace(targetRelease.DisplayName) ? targetRelease.DisplayName : targetRelease.TagName);
+        var header = string.Format(
+            CultureInfo.InvariantCulture,
+            "当前版本：{0}{1}目标版本：{2}{1}{1}将更新 {3} 个文件（新增 {4}，覆盖 {5}）。{1}home / data / logs / workspace / webui-data 会保留。{1}请确认是否覆盖程序文件：",
+            localText,
+            Environment.NewLine,
+            targetText,
+            plan.Items.Count.ToString(CultureInfo.InvariantCulture),
+            plan.AddCount.ToString(CultureInfo.InvariantCulture),
+            plan.UpdateCount.ToString(CultureInfo.InvariantCulture));
+        return ShowUpdateConfirmDialog(
+            "HermesGo 软件更新",
+            header,
+            BuildUpdatePreviewDialogLines(plan),
+            plan.ListFilePath);
+    }
+
+    private void ApplyUpdate(string extractedRoot)
+    {
+        var preserveRoots = BuildPreserveRoots(extractedRoot);
 
         var lockedFiles = new List<string>();
         foreach (var file in Directory.GetFiles(extractedRoot, "*", SearchOption.AllDirectories))
@@ -2226,18 +2526,7 @@ internal sealed class HermesBootstrap
                 var currentVersion = GetLocalVersion();
                 var currentVersionText = currentVersion != null ? currentVersion.ToString() : "unknown";
                 var targetVersionText = release.AgentVersion != null ? release.AgentVersion.ToString() : (!string.IsNullOrWhiteSpace(release.DisplayName) ? release.DisplayName : release.TagName);
-                var confirmPrompt = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "当前版本：{0}\r\n目标版本：{1}\r\n\r\n是否现在从官网下载并覆盖 HermesGo 便携包？\r\n会保留 home、data、logs、workspace、webui-data。\r\n\r\n选择“取消”可稍后再更新。",
-                    currentVersionText,
-                    targetVersionText);
-                if (!ShowPrimaryDeferPrompt("HermesGo 软件更新", confirmPrompt, "立即更新", "取消"))
-                {
-                    form.SetUpdateStatus("当前版本 " + currentVersionText + "，已取消更新。", true, true, release);
-                    return;
-                }
-
-                form.SetUpdateStatus("当前版本 " + currentVersionText + "，目标版本 " + targetVersionText + "，正在下载并覆盖 HermesGo 便携包...", false, false, release);
+                form.SetUpdateStatus("当前版本 " + currentVersionText + "，目标版本 " + targetVersionText + "，正在下载并生成更新列表...", false, false, release);
                 RunLauncherActionAsync(form, delegate
                 {
                     Action<string> progressReporter = delegate(string message)
@@ -2263,6 +2552,12 @@ internal sealed class HermesBootstrap
                     var updateResult = ApplyReleaseUpdateAsync(release, progressReporter).GetAwaiter().GetResult();
                     form.BeginInvoke(new Action(delegate
                     {
+                        if (updateResult.UserDeclined)
+                        {
+                            form.SetUpdateStatus("当前版本 " + currentVersionText + "，" + updateResult.Message, true, true, release);
+                            return;
+                        }
+
                         if (updateResult.Success)
                         {
                             var summaryText = string.IsNullOrWhiteSpace(updateResult.Summary) ? "未生成更新摘要。" : updateResult.Summary;
@@ -2365,6 +2660,12 @@ internal sealed class HermesBootstrap
         }
 
         var result = await ApplyReleaseUpdateAsync(release).ConfigureAwait(false);
+        if (result.UserDeclined)
+        {
+            Log("apply update now declined: " + result.Message);
+            return;
+        }
+
         if (!result.Success)
         {
             Log("apply update now failed: " + result.Message);
@@ -6071,15 +6372,24 @@ internal sealed class HermesBootstrap
     private sealed class UpdateResult
     {
         private readonly bool _success;
+        private readonly bool _userDeclined;
         private readonly string _message;
         private readonly string _sourceLabel;
         private readonly string _md5;
         private readonly long _bytes;
         private readonly string _summary;
 
-        private UpdateResult(bool success, string message, string sourceLabel, string md5, long bytes, string summary)
+        private UpdateResult(
+            bool success,
+            bool userDeclined,
+            string message,
+            string sourceLabel,
+            string md5,
+            long bytes,
+            string summary)
         {
             _success = success;
+            _userDeclined = userDeclined;
             _message = message;
             _sourceLabel = sourceLabel;
             _md5 = md5;
@@ -6088,6 +6398,7 @@ internal sealed class HermesBootstrap
         }
 
         public bool Success { get { return _success; } }
+        public bool UserDeclined { get { return _userDeclined; } }
         public string Message { get { return _message; } }
         public string SourceLabel { get { return _sourceLabel; } }
         public string Md5 { get { return _md5; } }
@@ -6096,12 +6407,17 @@ internal sealed class HermesBootstrap
 
         public static UpdateResult Successful(string sourceLabel, string md5, long bytes, string summary)
         {
-            return new UpdateResult(true, string.Empty, sourceLabel, md5, bytes, summary);
+            return new UpdateResult(true, false, string.Empty, sourceLabel, md5, bytes, summary);
         }
 
         public static UpdateResult Failed(string message)
         {
-            return new UpdateResult(false, message, string.Empty, string.Empty, 0, string.Empty);
+            return new UpdateResult(false, false, message, string.Empty, string.Empty, 0, string.Empty);
+        }
+
+        public static UpdateResult Declined(string message, bool cancelled)
+        {
+            return new UpdateResult(false, true, message, string.Empty, string.Empty, 0, string.Empty);
         }
     }
 
