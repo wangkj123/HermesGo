@@ -238,6 +238,12 @@ Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`�
 - **正确做法**：Desktop `MNt`：仅当 `scrollHeight-scrollTop-clientHeight > kNt` 时恢复；默认 `useRef(!1)` 不自动 re-pin；WebUI：unpinned 且 `snapshot.nearBottom` 时直接 `return` 不改 `scrollTop`；`kNt=48`
 - **涉及文件**：`patch_desktop_scroll.py`、`hermes-webui/static/ui.js`
 
+### 2026-05-20 — EXE 不提示升级 / README 版本过旧
+- **现象**：`HermesGo.exe` 不弹更新；`README.txt` 仍写 v0.14.4 但 `__init__.py` 已是 0.14.7；GitHub 只有带日期 zip 名
+- **错误做法**：只改 runtime `__version__` 不 stamp README；`HERMESGO_AUTO_UPDATE_PROMPT=0` 时静默直接覆盖；Release 只上传 `HermesGo-YYYY...zip` 无 `HermesGo-green-3ui-slim.zip`
+- **正确做法**：`build_zip_slim.py` 调 `stamp_readme_release_tag`；交互启动与菜单「更新」均 `ShowPrimaryDeferPrompt`（稍后/取消不升级）；`publish_github_release.py` 同时上传稳定资产名；测试树用 `packaging_sync` → `HermesGo-slim-test-v014`
+- **涉及文件**：`packaging_release.py`、`HermesGoBootstrap.cs`、`build_zip_slim.py`、`scripts/publish_github_release.py`
+
 ### 2026-05-20 — 冒烟/打包易踩坑（4 UI）
 - **现象**：`smoke_kanban_all_ui` 报 portable root=`E:\AI\hermes\HermesGo`；`build_zip_slim.py` 缺根目录 `.bat`；`patch_desktop_scroll.py` 报 `npx` 找不到；hello 冒烟无 key 却显示 webui OK
 - **错误做法**：冒烟不设 `HERMES_PORTABLE_APP_ROOT`；工作区无 `HermesGo/*.bat` 仍打包；子进程裸调 `npx`；把「无 API key」助手提示当成功

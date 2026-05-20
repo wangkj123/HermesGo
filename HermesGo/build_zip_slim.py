@@ -26,6 +26,7 @@ from packaging_release import (
     ensure_runtime_version,
     prune_old_slim_zips,
     read_runtime_version,
+    stamp_readme_release_tag,
 )
 from packaging_safe import assert_zip_has_no_reserved_entries, is_windows_reserved_name, should_skip_pack_path
 from packaging_sync import resolve_test_package_root, sync_test_package_from_zip
@@ -158,6 +159,9 @@ def add_tree(zf: zipfile.ZipFile, base: str, rel_prefix: str) -> tuple[int, int]
 def main() -> int:
     os.makedirs(OUT_DIR, exist_ok=True)
     ensure_runtime_version(VERSION)
+    readme_path = os.path.join(SCRIPT_DIR, "README.txt")
+    if os.path.isfile(readme_path):
+        stamp_readme_release_tag(readme_path, VERSION, RELEASE_TAG)
     runtime_ver = read_runtime_version()
     if runtime_ver != VERSION:
         print(f"ERROR: runtime version {runtime_ver!r} != build {VERSION!r}")

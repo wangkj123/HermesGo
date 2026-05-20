@@ -7,7 +7,7 @@ import re
 import zipfile
 
 # Single source of truth for slim green builds (keep in sync with GitHub release tag).
-SLIM_VERSION = "0.14.7"
+SLIM_VERSION = "0.14.8"
 RELEASE_SUFFIX = "green-3ui-slim"
 RELEASE_TAG = f"v{SLIM_VERSION}-{RELEASE_SUFFIX}"
 
@@ -66,6 +66,46 @@ def ensure_runtime_version(version: str = SLIM_VERSION, init_path: str = RUNTIME
     with open(init_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(updated)
     print(f"Bumped runtime __version__: {current} -> {version}")
+
+
+def stamp_readme_release_tag(
+    readme_path: str,
+    version: str = SLIM_VERSION,
+    tag: str = RELEASE_TAG,
+) -> None:
+    """Keep package-root README in sync so HermesGo.exe can read Current release tag."""
+    readme_path = os.path.abspath(readme_path)
+    if not os.path.isfile(readme_path):
+        raise FileNotFoundError(readme_path)
+
+    text = open(readme_path, encoding="utf-8").read()
+    text = re.sub(
+        r"(HermesGo green portable package \(v)[^,\)]+(, three UIs)",
+        rf"\g<1>{version}\g<2>",
+        text,
+        count=1,
+    )
+    text = re.sub(
+        r"(HermesGo 绿色便携包（v)[^）]+(，三套界面)",
+        rf"\g<1>{version}\g<2>",
+        text,
+        count=1,
+    )
+    text = re.sub(
+        r"(Current release tag:\s*)[^\r\n]+",
+        rf"\g<1>{tag}",
+        text,
+        count=1,
+    )
+    text = re.sub(
+        r"(当前发行标签：\s*)[^\r\n]+",
+        rf"\g<1>{tag}",
+        text,
+        count=1,
+    )
+    with open(readme_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    print(f"Stamped README release metadata: v{version} / {tag}")
 
 
 def read_runtime_version(init_path: str = RUNTIME_VERSION_FILE) -> str:

@@ -53,17 +53,18 @@ def main() -> int:
         return 3
     asset = artifacts[0]
 
-    tag = "v0.14.7-green-3ui-slim"
-    release_name = "HermesGo v0.14.7 green 3-UI slim"
-    body = """## HermesGo v0.14.7 green portable (CLI + Dashboard + WebUI + Desktop)
+    stable_asset_name = "HermesGo-green-3ui-slim.zip"
+    tag = "v0.14.8-green-3ui-slim"
+    release_name = "HermesGo v0.14.8 green 3-UI slim"
+    body = """## HermesGo v0.14.8 green portable (CLI + Dashboard + WebUI + Desktop)
 
 ### Fixes in this build
-- **Chat scroll**: Desktop `MNt` v3 (`kNt=48`, default unpinned, no stale scroll restore at bottom); WebUI unpinned near-bottom no longer jumps up
-- **Kanban**: Desktop-only still starts WebUI 8787; Dashboard `/api/kanban/*` proxy to WebUI; portable `kanban.db` sync
-- **Portable isolation**: `workspace/`, `webui-data/`, `HERMES_PORTABLE_*` — no host `.cursorrules` / dev repo paths
-- **Packaging/smoke**: root `Hermes*.bat` in zip; `HERMES_PORTABLE_APP_ROOT` in smokes; `patch_desktop_scroll.py` Windows `npx` fix
-- **Runtime version**: `hermes_cli` `__version__` = `0.14.7`
-- Self-test: `run_full_smoke_iter.ps1` (gateway, Kanban all UI, hello all UI, desktop verify)
+- **EXE auto-update**: interactive launch always shows confirm dialog (立即更新 / 稍后); menu「更新」also confirms before download; not forced every launch
+- **README version**: `Current release tag` stamped at build time (matches `hermes_cli` __version__)
+- **Release asset**: stable download name `HermesGo-green-3ui-slim.zip` plus dated zip on GitHub
+- **Chat scroll** (from v0.14.7): Desktop/WebUI bottom scroll stability; Kanban + portable isolation
+- **Runtime version**: `hermes_cli` `__version__` = `0.14.8`
+- Self-test: `run_full_smoke_iter.ps1` (all smokes passed)
 
 ### UIs
 - **HermesGo.exe** / **HermesGo.bat** — Dashboard + WebUI; optional `--menu`; auto-update from this repo
@@ -118,12 +119,15 @@ py -3 scripts/publish_github_release.py
         rel_id = rr.json()["id"]
 
     rel = session.get(f"{api}/releases/{rel_id}", headers=headers, timeout=60).json()
+    upload_names = [asset.name, stable_asset_name]
     for a in rel.get("assets", []):
-        if a.get("name") == asset.name:
+        if a.get("name") in upload_names:
             session.delete(f"{api}/releases/assets/{a['id']}", headers=headers, timeout=60).raise_for_status()
 
     upload_url = rel["upload_url"].split("{", 1)[0]
-    with open(asset, "rb") as f:
+    zip_bytes = asset.read_bytes()
+    uploaded: list[str] = []
+    for upload_name in upload_names:
         up = session.post(
             upload_url,
             headers={
@@ -131,20 +135,21 @@ py -3 scripts/publish_github_release.py
                 "Content-Type": "application/zip",
                 "Accept": "application/vnd.github+json",
             },
-            params={"name": asset.name},
-            data=f,
+            params={"name": upload_name},
+            data=zip_bytes,
             timeout=3600,
         )
         up.raise_for_status()
+        uploaded.append(upload_name)
+        print("uploaded", upload_name)
 
     final_rel = session.get(f"{api}/releases/{rel_id}", headers=headers, timeout=60).json()
     print("release_url=", final_rel.get("html_url"))
     for a in final_rel.get("assets", []):
-        if a.get("name") == asset.name:
+        if a.get("name") in uploaded:
             print("asset_url=", a.get("browser_download_url"))
             print("asset_name=", a.get("name"))
             print("asset_size=", a.get("size"))
-            break
     return 0
 
 

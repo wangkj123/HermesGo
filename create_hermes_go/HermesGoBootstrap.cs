@@ -250,9 +250,18 @@ internal sealed class HermesBootstrap
             var release = await ResolveTargetReleaseAsync().ConfigureAwait(false);
             if (release == null || !ShouldUpdateRelease(localTag, release))
             {
+                var localVersion = GetLocalVersion();
+                Log(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "auto update skipped: local={0} tag={1} remote={2}",
+                    localVersion,
+                    localTag ?? "(none)",
+                    release != null ? (release.AgentVersion != null ? release.AgentVersion.ToString() : release.TagName) : "(none)"));
                 return;
             }
 
+            var currentVersion = GetLocalVersion();
+            var currentVersionText = currentVersion != null ? currentVersion.ToString() : "unknown";
             var targetText = release.AgentVersion != null
                 ? release.AgentVersion.ToString()
                 : (!string.IsNullOrWhiteSpace(release.DisplayName) ? release.DisplayName : release.TagName);
@@ -269,20 +278,19 @@ internal sealed class HermesBootstrap
                 return;
             }
 
-            if (ReadBoolEnv(AutoUpdatePromptEnv, defaultValue: true))
+            var prompt = string.Format(
+                CultureInfo.InvariantCulture,
+                "当前版本：{0}{1}发现新版本：{2}{1}{1}是否现在下载并覆盖程序文件？{1}会保留 home、data、logs、workspace、webui-data。{1}{1}选择“稍后”将直接启动当前版本（不会自动升级）。",
+                currentVersionText,
+                Environment.NewLine,
+                targetText);
+            if (!ShowPrimaryDeferPrompt("HermesGo 软件更新", prompt, "立即更新", "稍后"))
             {
-                var prompt = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "发现 HermesGo 新版本：{0}{1}{1}是否现在下载并覆盖程序文件？{1}会保留 home、data、logs 目录。{1}{1}选择“稍后”将直接启动当前版本。",
-                    targetText,
-                    Environment.NewLine);
-                if (!ShowPrimaryDeferPrompt("HermesGo 自动更新", prompt, "立即更新", "稍后"))
-                {
-                    return;
-                }
+                Log("auto update deferred by user");
+                return;
             }
 
-            Log("auto update before launch (interactive)");
+            Log("auto update before launch (interactive, confirmed)");
             var result = await ApplyReleaseUpdateAsync(release).ConfigureAwait(false);
             if (!result.Success)
             {
@@ -2218,7 +2226,18 @@ internal sealed class HermesBootstrap
                 var currentVersion = GetLocalVersion();
                 var currentVersionText = currentVersion != null ? currentVersion.ToString() : "unknown";
                 var targetVersionText = release.AgentVersion != null ? release.AgentVersion.ToString() : (!string.IsNullOrWhiteSpace(release.DisplayName) ? release.DisplayName : release.TagName);
-                            form.SetUpdateStatus("当前版本 " + currentVersionText + "，目标版本 " + targetVersionText + "，正在下载并覆盖 HermesGo 便携包...", false, false, release);
+                var confirmPrompt = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "当前版本：{0}\r\n目标版本：{1}\r\n\r\n是否现在从官网下载并覆盖 HermesGo 便携包？\r\n会保留 home、data、logs、workspace、webui-data。\r\n\r\n选择“取消”可稍后再更新。",
+                    currentVersionText,
+                    targetVersionText);
+                if (!ShowPrimaryDeferPrompt("HermesGo 软件更新", confirmPrompt, "立即更新", "取消"))
+                {
+                    form.SetUpdateStatus("当前版本 " + currentVersionText + "，已取消更新。", true, true, release);
+                    return;
+                }
+
+                form.SetUpdateStatus("当前版本 " + currentVersionText + "，目标版本 " + targetVersionText + "，正在下载并覆盖 HermesGo 便携包...", false, false, release);
                 RunLauncherActionAsync(form, delegate
                 {
                     Action<string> progressReporter = delegate(string message)
