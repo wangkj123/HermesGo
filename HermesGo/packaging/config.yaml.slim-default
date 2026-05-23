@@ -1,3 +1,11 @@
+# HermesGo green portable — all state lives next to this file (app/home), not on the host.
+# windows_only: Hermes Agent uses Windows + bundled Python; target users typically have no WSL.
+# Does not restrict Cursor IDE or other software on the machine.
+portable:
+  strict: true
+  windows_only: true
+  disable_wsl: true
+
 model:
   provider: "deepseek"
   default: "deepseek-v4-flash"
@@ -8,3 +16,22 @@ terminal:
   cwd: "."
   timeout: 180
   lifetime_seconds: 300
+
+# Green slim: no Firecrawl/Tavily key — web_search uses bundled ddgs (DuckDuckGo).
+agent:
+  tool_use_enforcement: true
+
+display:
+  skin: default
+  personality: kawaii
+  compact: false
+
+web:
+  backend: duckduckgo
+
+# Bundled under app/optional-skills/ (see packaging/bundled_skills.py).
+skills:
+  external_dirs:
+    - "${HERMES_PORTABLE_APP_ROOT}/optional-skills/research"
+    - "${HERMES_PORTABLE_APP_ROOT}/optional-skills/devops"
+    - "${HERMES_PORTABLE_APP_ROOT}/optional-skills/communication"

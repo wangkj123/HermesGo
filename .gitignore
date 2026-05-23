@@ -52,6 +52,7 @@ create_hermes_go/.scratch/
 
 # Local test extract (synced from dist zip; not source)
 HermesGo-slim-test-v014/
+HermesGo/packaging/test-deepseek.key
 _tmp_desktop_asar/
 
 # Large portable runtimes (built or vendored; not git source)

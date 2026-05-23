@@ -81,10 +81,48 @@ def sync_test_package_from_zip(zip_path: str, dest_root: str) -> None:
         )
     print("Test package sync verified (key files match zip)")
 
+    configure_mod_path = os.path.join(SCRIPT_DIR, "packaging", "configure_test_package.py")
+    if os.path.isfile(configure_mod_path):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "hermesgo_configure_test_package", configure_mod_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(mod)
+        mod.configure_test_package(dest_root)
+
+
+def _read_sync_dest_file(path: str) -> str | None:
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = (handle.read() or "").strip()
+        return text or None
+    except OSError:
+        return None
+
 
 def resolve_test_package_root() -> str:
     override = os.environ.get("HERMESGO_TEST_PACKAGE_ROOT", "").strip()
-    return override or DEFAULT_TEST_PACKAGE_ROOT
+    if override:
+        return override
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for candidate in (
+        os.path.join(repo_root, "sync-dest.txt"),
+        os.path.join(repo_root, "HermesGo", "sync-dest.txt"),
+        os.path.join(repo_root, "HermesGo", "home", "sync-dest.txt"),
+        os.path.join(repo_root, "HermesGo", "app", "sync-dest.txt"),
+        os.path.join(repo_root, "HermesGo", "app", "home", "sync-dest.txt"),
+    ):
+        picked = _read_sync_dest_file(candidate)
+        if picked:
+            return picked
+
+    return DEFAULT_TEST_PACKAGE_ROOT
 
 
 def find_latest_slim_zip(dist_dir: str) -> str | None:

@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from hermes_constants import get_hermes_home
+from hermes_constants import ensure_hermes_green_windows_env, get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tui_gateway.transport import (
@@ -30,6 +30,7 @@ from tui_gateway.transport import (
 logger = logging.getLogger(__name__)
 
 _hermes_home = get_hermes_home()
+ensure_hermes_green_windows_env()
 load_hermes_dotenv(
     hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env"
 )
@@ -2099,6 +2100,13 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
 def _make_agent(sid: str, key: str, session_id: str | None = None):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    try:
+        from hermes_cli.portable_bootstrap import ensure_portable_web_search_installed
+
+        ensure_portable_web_search_installed()
+    except Exception:
+        pass
 
     cfg = _load_cfg()
     agent_cfg = cfg.get("agent") or {}

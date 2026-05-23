@@ -7,6 +7,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$env:HERMES_DISABLE_WSL = "1"
+$env:HERMES_PREFER_WINDOWS = "1"
+
 function Resolve-PortablePath {
     param([string]$Path)
 
@@ -75,7 +78,19 @@ function Update-YamlValue {
     return [regex]::Replace($Text, $pattern, $replacement)
 }
 
+$globalPathScript = Join-Path $PSScriptRoot "scripts\Ensure-HermesGoGlobalPath.ps1"
+if (-not (Test-Path -LiteralPath $globalPathScript)) {
+    $globalPathScript = Join-Path $PSScriptRoot "Ensure-HermesGoGlobalPath.ps1"
+}
+if (Test-Path -LiteralPath $globalPathScript) {
+    . $globalPathScript
+    Register-HermesGoGlobalPathFromScriptRoot -ScriptRoot $PSScriptRoot
+}
+
 $root = Resolve-PortablePath -Path (Join-Path $PSScriptRoot "..")
+if (-not (Test-Path -LiteralPath (Join-Path $root "runtime\python311\python.exe"))) {
+    $root = Resolve-HermesGoAppRootFromScript -ScriptRoot $PSScriptRoot
+}
 $homeDir = Join-Path $root "home"
 $defaultsPath = Join-Path $homeDir "portable-defaults.txt"
 $configPath = Join-Path $homeDir "config.yaml"

@@ -22,6 +22,7 @@ alwaysApply: false
 | PS 5.1 子进程环境 | `Start-Process -Environment` | `Start-ProcessWithEnvironment`（见 `Start-HermesGo.ps1`） |
 | Agent 终端命令 | `git` / `py` / `cmd` 裸调用 | 全路径：`Git\cmd\git.exe`、包内 `python.exe`、上述 `powershell.exe` |
 | 自测运行环境 | WSL 里测 COM/便携包 | **Windows 本机** Shell + 包内 Python 绝对路径 |
+| WSL 适用范围 | 要求用户装 WSL、或影响 Cursor/系统 | **所有 Hermes 入口**设 `HERMES_DISABLE_WSL=1`（exe/bat/gateway/dashboard/WebUI/Desktop/**cmd hermes**/Chat 窗）；`hermes_green_windows_only()` 兜底；**与 Cursor 无关** |
 | zip 根目录 | 散落 scripts/tools | 仅 `HermesGo.exe`、`README.txt`、三个 `.bat`；其余在 `app/` |
 | 产物位置 | `build_zip_slim.py` 复制 zip 到桌面 | 只输出 `dist/`；测试树用 `packaging_sync` 同步，**不要**拷到 Desktop |
 | dist 清理 | 保留每次构建的全部历史 zip | `build_zip_slim.py` 构建后 `prune_old_slim_zips` 只留最新 slim zip + `README.txt` |
@@ -268,6 +269,12 @@ Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`�
 - **正确做法**：`build_zip_slim.py` 调 `stamp_readme_release_tag`；交互启动与菜单「更新」均 `ShowPrimaryDeferPrompt`（稍后/取消不升级）；`publish_github_release.py` 同时上传稳定资产名；测试树用 `packaging_sync` → `HermesGo-slim-test-v014`
 - **涉及文件**：`packaging_release.py`、`HermesGoBootstrap.cs`、`build_zip_slim.py`、`scripts/publish_github_release.py`
 
+### 2026-05-20 — 多屏打开目录/启动菜单位置与 PrimaryScreen 为空
+- **现象**：多显示器下「打开 home/logs」或 `--menu` 启动器跑到主屏、甚至直接崩溃；日志里少见明确栈，多为 `Screen.PrimaryScreen` 空引用
+- **错误做法**：`Screen.PrimaryScreen.WorkingArea` 无空判断；`explorer.exe` 裸参数 + `UseShellExecute=false`；把所有 explorer 窗口都 MoveWindow
+- **正确做法**：`UiScreenAnchor` 在启动时捕获当前屏，表单用 `Manual` 居中到该屏工作区；`OpenFolder` 用 `UseShellExecute=true` 打开目录并把新开 explorer 挪到目标屏；改 bootstrap 后跑 `HermesGo\scripts\Compile-HermesGoBootstrap.ps1` 并替换包根 `HermesGo.exe`
+- **涉及文件**：`create_hermes_go/HermesGoBootstrap.cs`
+
 ### 2026-05-20 — 冒烟/打包易踩坑（4 UI）
 - **现象**：`smoke_kanban_all_ui` 报 portable root=`E:\AI\hermes\HermesGo`；`build_zip_slim.py` 缺根目录 `.bat`；`patch_desktop_scroll.py` 报 `npx` 找不到；hello 冒烟无 key 却显示 webui OK
 - **错误做法**：冒烟不设 `HERMES_PORTABLE_APP_ROOT`；工作区无 `HermesGo/*.bat` 仍打包；子进程裸调 `npx`；把「无 API key」助手提示当成功
@@ -285,3 +292,129 @@ Desktop：`HermesGo\HermesDesktop.bat` 或 `scripts\smoke_portable_desktop.py`�
 - **错误做法**：gateway/dashboard `WorkingDirectory=runtime/hermes-agent`；工具扫 `E:\AI\hermes` 时 `subdirectory_hints` 仍加载主机 `.cursorrules`；`terminal.cwd: .` 相对开发机目录
 - **正确做法**：`Ensure-PortableLayout` 创建 `workspace/`、`webui-data/`、`home/desktop-shell/`，把 `terminal.cwd` 写成绝对 `app/workspace`；导出 `HERMES_PORTABLE_*`、`TERMINAL_CWD`、`HERMES_DESKTOP_USER_DATA_DIR`；`subdirectory_hints._within_portable_root` + `prompt_builder._portable_context_cwd` 限制在 `HERMES_PORTABLE_APP_ROOT` 内
 - **涉及文件**：`Start-HermesGo.ps1`、`agent/subdirectory_hints.py`、`agent/prompt_builder.py`、`run_agent.py`
+
+### 2026-05-20 — Windows 强制删除命令路径转义风险
+- **现象**：本意只删除占用日志目录，结果工作区出现过度删除（根目录几乎清空）
+- **错误做法**：❌ 在 PowerShell 中拼接 `cmd /c rmdir /s /q "\\?\$path"`，并在未再次校验绝对路径时执行强制删除
+- **正确做法**：✅ 仅使用 `Remove-Item -LiteralPath` + 白名单校验 + `-WhatIf` 预演；占用文件先按路径精准 `Stop-Process`，禁止使用字符串拼接的 `cmd rmdir` 兜底
+- **涉及文件**：`scripts/Invoke-HermesSafeCleanup.ps1`
+
+### 2026-05-22 — 绿色版全入口禁用 WSL（含 cmd hermes）
+- **现象**：用户要求 gateway、Dashboard、Desktop、外挂 Chat/cmd、`hermes.cmd` 均不得走 WSL 分支
+- **错误做法**：❌ 仅在 bat 上设变量、子进程未继承；❌ 只靠 `is_wsl()` 读 `/proc/version` 而无绿色包兜底
+- **正确做法**：✅ `Start-HermesGo.ps1` 统一 `HERMES_DISABLE_WSL=1` + `Add-HermesGreenRuntimeEnv`；`hermes.cmd`/`portable-shell-init.cmd`/`Start-ChatWindow`；`ensure_hermes_green_windows_env()` 于 `main.py`、`run.py`、`tui_gateway/server.py`；`hermes_green_windows_only()` 使 `is_wsl()` 恒 false
+- **涉及文件**：`hermes_constants.py`、`Start-HermesGo.ps1`、`Ensure-HermesGoGlobalPath.ps1`、`Hermes*.bat`、`Verify/Switch*.bat/ps1`
+
+### 2026-05-22 — Desktop Shell 里 API Key「丢失」
+- **现象**：Dashboard/WebUI 已配好 DeepSeek/Codex；Desktop 内 Windows Shell 或 `hermes` 仍提示未配置 / 无 API key
+- **错误做法**：❌ 假定 Electron 子进程继承启动时环境即可；❌ 只靠 `config.yaml` 有 provider 不写 `.env`；❌ Shell 用 `%LOCALAPPDATA%\hermes` 当 `HERMES_HOME`
+- **正确做法**：✅ `patch_desktop_portable_shell.py` 让 `terminalShellEnv()` 每次开 Shell 从 `HERMES_HOME/.env` 合并密钥；✅ `cmd /K app/home/portable-shell-init.cmd`；✅ `hermes_cli/main.py` 在 `cmd_chat` 前 `load_hermes_dotenv`；✅ Shell 用 `app/runtime/bin/hermes.cmd`
+- **涉及文件**：`scripts/patch_desktop_portable_shell.py`、`Start-HermesGo.ps1`、`hermes_cli/main.py`、`build_zip_slim.py`
+
+### 2026-05-22 — 绿色版须严格即插即用（不写主机；Hermes 不依赖 WSL）
+- **现象**：启动 exe 后 Windows Shell 里 `hermes` 提示未配置；或配置/API Key 写到 `%USERPROFILE%\.hermes`、用户 PATH
+- **错误做法**：❌ 默认 `Ensure-HermesGoGlobalPath` 写 User PATH/HERMES_HOME；❌ `Ensure-PortableAuthFromProfile` 从 `~/.hermes` 复制；❌ 让绿色版 Hermes 走 WSL/bash（目标用户机通常未装 WSL）；❌ 把「禁用 WSL」理解成限制 Cursor
+- **正确做法**：✅ 默认 `HERMESGO_STRICT_PORTABLE=1`（bat/exe/hermes.cmd）；数据仅在 `app/home`；CLI 用 `app/runtime/bin/hermes.cmd`；**全部子进程 + 外挂 cmd** 设 `HERMES_DISABLE_WSL=1`；Python 侧 `ensure_hermes_green_windows_env()` + `is_wsl()` 恒 false；**不要求、不安装 WSL**；需写主机时显式 `HERMESGO_ALLOW_HOST=1`
+- **涉及文件**：`Start-HermesGo.ps1`、`Ensure-HermesGoGlobalPath.ps1`、`hermes_constants.py`、`HermesGo*.bat`、`HermesGoBootstrap.cs`、`packaging/config.yaml.slim-default`
+
+### 2026-05-22 — 双击 exe 须一次配齐（勿再跑 bat/手动 setup）
+- **现象**：用户希望只执行 `HermesGo.exe` 即完成 home/config/.env、hermes.cmd、shell init、gateway、三件套 UI，仍去跑 `HermesGo.bat` 或 CLI `setup`
+- **错误做法**：❌ exe 只起菜单或只开 Desktop 不做 `Initialize-*`；❌ 初始化逻辑散落在 try 块多段、与 bat 不一致；❌ Bootstrap 子进程未带 `HERMESGO_CONFIGURE_ALL`
+- **正确做法**：✅ 无 `--menu` 时 `ShouldUseDirectLaunch` → `LaunchPackage` → `Start-HermesGo.ps1`；✅ `Initialize-HermesGoPortablePackage` 统一调用 layout/config/dotenv/wrapper/shell-init + `ensure_portable_exe_ready()`；✅ exe 设 `HERMESGO_LAUNCHED_BY_EXE=1`、`HERMESGO_CONFIGURE_ALL=1`；✅ 写 `app/.hermesgo-ready` 标记；CLI 仍用 `app\runtime\bin\hermes.cmd`（严格模式不写主机 PATH）
+- **涉及文件**：`HermesGoBootstrap.cs`、`Start-HermesGo.ps1`、`hermes_cli/portable_bootstrap.py`、`README.txt`
+
+### 2026-05-22 — 启动后命令行找不到 hermes
+- **现象**：双击 `HermesGo.exe` / `.bat` 能起三件套，但新开 CMD/PowerShell 输入 `hermes` 报不是内部或外部命令
+- **错误做法**：❌ 只改当前进程的 `$env:PATH`；假设 `runtime/bin` 里已有 wrapper 且已写入系统环境变量
+- **正确做法**：✅ `Start-HermesGo.ps1` 调用 `scripts/Ensure-HermesGoGlobalPath.ps1`：生成 `app/runtime/bin/hermes.cmd`，把该目录写入 **User** `Path` 并设 `HERMES_HOME=app/home`；全机用 `HERMESGO_PATH_SCOPE=Machine` 且管理员运行；禁用 `HERMESGO_SKIP_GLOBAL_PATH=1`；**新开终端**后执行 `hermes --version`
+- **涉及文件**：`HermesGo/scripts/Ensure-HermesGoGlobalPath.ps1`、`Start-HermesGo.ps1`、`build_zip_slim.py`（打包进 `app/scripts/`）
+
+### 2026-05-23 — Dashboard Codex OAuth 一点就报错
+- **现象**：`agent.log` 中 `AttributeError: module 'hermes_cli.auth' has no attribute '_generate_codex_pkce'`；Dashboard 点 Codex 登录立即 500
+- **错误做法**：`web_server._start_codex_browser_flow` 调用未在 `auth.py` 实现的 `_generate_codex_pkce` / `_start_codex_browser_login_server`
+- **正确做法**：在 `auth.py` 实现 `CODEX_BROWSER_REDIRECT_URI`、`_generate_codex_pkce`、`_CodexBrowserLoginServer`、`_start_codex_browser_login_server`、`_build_codex_browser_auth_url`（1455 失败回退 ephemeral 端口）
+- **涉及文件**：`runtime/hermes-agent/hermes_cli/auth.py`、`web_server.py`
+
+### 2026-05-23 — app/home/.env 带 UTF-8 BOM 导致 DeepSeek 密钥无效
+- **现象**：`.env` 有 `EF BB BF` 前缀，`DEEPSEEK_API_KEY` 读成 `\ufeffDEEPSEEK_API_KEY`；Dashboard/Agent 报无 API Key，但文件里明明有 sk-
+- **错误做法**：`Set-Content -Encoding utf8`（PS 5.1 写 BOM）；`Read-DotEnvFile` / `load_dotenv(encoding=utf-8)` 不剥离 BOM
+- **正确做法**：`.env` 用 `Write-Utf8NoBomFile`；`Read-DotEnvFile` 对 key `TrimStart(BOM)`；Python `env_loader` 用 `utf-8-sig`
+- **涉及文件**：`Start-HermesGo.ps1`、`hermes_cli/env_loader.py`
+
+### 2026-05-23 — Write-PortableShellEnvBootstrap 赋值 `$home` 启动失败
+- **现象**：`HermesGo startup failed: 无法覆盖变量 HOME，因为该变量为只读变量或常量`；停在 layout 之后
+- **错误做法**：`Write-PortableShellEnvBootstrap` 内 ` $home = Join-Path $AppRoot "home"`（与 PowerShell 自动变量 `$HOME` 冲突）
+- **正确做法**：局部变量改用 `$appHome`；`.env` 导入跳过 `HOME` 等保留键
+- **涉及文件**：`Start-HermesGo.ps1`
+
+### 2026-05-23 — VS Code ACP 绿色版须便携 hermes.cmd + agent-client-protocol
+- **现象**：用户要在 VS Code 里编程；`hermes acp` 报 `ACP dependencies not installed`；扩展用系统 `hermes` 找不到绿色包配置
+- **错误做法**：❌ 只文档写 `pip install -e '.[acp]'` 不装进 `runtime/python311`；❌ VS Code 指向 `~/.hermes` 或主机 PATH
+- **正确做法**：✅ `ensure_portable_acp_deps()` + `HermesVSCode.bat` 启动 **仅 Microsoft VS Code**（`Find-VSCodeCli`，不找 Cursor）；✅ `app/editor/vscode/hermes-vscode.settings.json`；✅ 打包前 `install_slim_runtime_extras.py`；✅ 扩展 `formulahendry.acp-client`
+- **涉及文件**：`Install-HermesVSCode.ps1`、`HermesVSCode.bat`、`packaging/docs/VSCODE-GREEN.md`
+
+### 2026-05-23 — VS Code 绿色版入口命名（非 ACP、非 Cursor）
+- **现象**：`HermesVSCodeACP.bat` 不启动 VS Code；用户要「VS Code 绿色版」且名字不带 ACP
+- **错误做法**：❌ 只生成 JSON 不 `Start-Process` VS Code；❌ `Find-EditorCli` 包含 Cursor
+- **正确做法**：✅ 根目录 `HermesVSCode.bat` + `Install-HermesVSCode.ps1`；✅ 仅 `code` / `Code.exe` 路径；✅ 默认 `-LaunchEditor` 打开 `app\workspace`；文档 `VSCODE-GREEN.md`
+- **涉及文件**：`HermesVSCode.bat`、`scripts/Install-HermesVSCode.ps1`
+
+### 2026-05-23 — 打包后自动 sync 到 HermesGo-slim-test-v014 并配 DeepSeek Key
+- **现象**：用户期望每次 `build_zip_slim.py` 完成后测试树已是解压好的最新包且 API Key 已写好
+- **错误做法**：❌ 设 `HERMESGO_SKIP_TEST_SYNC=1` 后不同步；❌ 只打 zip 不跑 `packaging_sync.py`；❌ Key 只写在对话里
+- **正确做法**：✅ `build_zip_slim.py` 结束自动 `sync_test_package_from_zip` → `HermesGo-slim-test-v014\HermesGo`；✅ `packaging/configure_test_package.py` + `packaging/test-deepseek.key`（gitignore）或 `HERMESGO_DEEPSEEK_API_KEY` 写 `app/home/.env` + deepseek `config.yaml`
+- **涉及文件**：`packaging_sync.py`、`build_zip_slim.py`、`packaging/configure_test_package.py`
+
+### 2026-05-23 — 完整绿色包禁止首启 pip 下载
+- **现象**：用户要求「完整包、开机不下载」；首启仍 `pip install ddgs` / `agent-client-protocol`
+- **错误做法**：❌ `build_zip_slim` 对 extras 仅 WARN；❌ 运行时 `ensure_portable_*_deps` 无网仍调 pip
+- **正确做法**：✅ 构建前 `install_slim_runtime_extras.py` 失败则中止打包；✅ zip 内须含 `site-packages/acp/` 与 `ddgs/`；✅ 标记 `no_pip_download=1` 且 `HERMESGO_NO_PIP_DOWNLOAD=1`
+- **涉及文件**：`packaging/install_slim_runtime_extras.py`、`packaging/verify_zip_offline_extras.py`、`Start-HermesGo.ps1`
+
+### 2026-05-23 — Desktop 仍用 curl 而非联网检索
+- **现象**：绿色版已装 optional-skills/ddgs，Desktop 对话里仍大量 `curl` 抓网页
+- **错误做法**：❌ 以为「浏览器插件」= Chrome 扩展；❌ 只靠 duckduckgo-search **技能**让模型走 terminal+`ddgs`/`curl`；❌ 不重启 gateway（旧 Python 进程缓存旧 `web_tools`）；❌ 未在系统提示里禁止 curl 搜网页
+- **正确做法**：✅ `web_tools.py` 无付费 Key 时 `web_search` 走 `ddgs`；✅ `web.backend: duckduckgo`；✅ `prompt_builder._hermesgo_green_web_search_hint()` 强制优先 `web_search`；✅ 改 duckduckgo skill 优先 `web_search` 而非 curl；✅ 改代码后跑 `app/scripts/Restart-HermesGoServices.ps1` 再开 Desktop；❌ **browser_*** 仍需 Chrome 调试端口
+- **涉及文件**：`tools/web_tools.py`、`agent/prompt_builder.py`、`optional-skills/.../duckduckgo-search/SKILL.md`、`scripts/Restart-HermesGoServices.ps1`
+
+### 2026-05-23 — slim 无 web_search 时 Agent 用 curl 极慢
+- **现象**：Desktop 问联网问题时出现大量 `curl api.github.com`、超时/审批拒绝；比 Cursor/Trae 慢很多轮
+- **错误做法**：❌ 以为未装「插件」；❌ 只靠 terminal+curl；❌ slim 不打包 `optional-skills`、不装 `ddgs`
+- **正确做法**：✅ 联网检索优先 `web_search`（配置 `TAVILY_API_KEY` 或 `FIRECRAWL_API_KEY`）；✅ slim 默认打包 `optional-skills` 中 `duckduckgo-search` 等并写 `skills.external_dirs`；✅ 启动时 `ensure_portable_web_search_deps()` 安装 `ddgs`；✅ `HERMES_OPTIONAL_SKILLS=app/optional-skills`
+- **涉及文件**：`hermes_cli/portable_bundled_skills.py`、`packaging/config.yaml.slim-default`、`build_zip_slim.py`、`Start-HermesGo.ps1`、`hermes_cli/portable_bootstrap.py`
+
+### 2026-05-23 — CLI 变黑白（NO_COLOR / TERM=dumb）
+- **现象**：HermesGo Chat/CLI 从金色 kawaii 变成黑白，config 仍是 `display.skin: default`
+- **错误做法**：❌ 只改 `skin: default` 不处理环境变量；❌ 以为 Rich 坏了
+- **正确做法**：✅ 便携启动清除 `NO_COLOR`、设 `HERMES_FORCE_COLOR=1`、`FORCE_COLOR=1`、`TERM=xterm-256color`；✅ `hermes_cli/colors.py` 在 `HERMES_PORTABLE_APP_ROOT` 下忽略 NO_COLOR；✅ `cli.py` 启动时 pop NO_COLOR；✅ Chat 窗口 cmd 链与 `portable-shell-init.cmd` 同步
+- **涉及文件**：`Start-HermesGo.ps1`、`runtime/bin/hermes.cmd`、`hermes_cli/colors.py`、`cli.py`
+
+### 2026-05-23 — build_zip_slim 无 npx 时桌面 patch 失败
+- **现象**：`build_zip_slim.py` 报 `FileNotFoundError: npx not found`；机器未装 Node.js
+- **错误做法**：❌ 强行要求每次 npx patch；❌ 无 marker 检测仍中止打包
+- **正确做法**：✅ `app.asar` 已含 `scrollToIndex`/`mergePortableCredentialsIntoShellEnv` marker 时跳过 `patch_desktop_*.py`；✅ 新环境需 Node/npx 或预 patch 后再打包
+- **涉及文件**：`build_zip_slim.py`、`scripts/patch_desktop_scroll.py`
+
+### 2026-05-23 — Desktop 改 web_search 后仍 curl：Dashboard(9119) 未重启
+- **现象**：`web_search`/`ddgs` 已装进包且 CLI 冒烟 OK，但 Desktop/`tools.show` 只有 18 个工具、无 `web_search`；会话报 `Tool 'web_search' does not exist` 后走 `python3 -c`+urllib
+- **错误做法**：❌ 只重启 `gateway run` 或只杀 `Hermes.exe`；❌ `Restart-HermesGoServices.ps1` 仅匹配 `hermes_cli*main.py`（漏掉 `-m hermes_cli.main dashboard`）
+- **正确做法**：✅ Desktop WebSocket 走 **Dashboard 进程**（`hermes_cli.main dashboard --port 9119`），必须与 gateway 一并重启；✅ 重启脚本匹配 `hermes_cli.main`/`hermes_cli\\main.py` 并释放 `:9119/:8787`；✅ 用 `scripts/smoke_web_search_desktop.py` 或 `probe_gateway_tools.py` 验证 `tools.show` 含 `web_search`
+- **涉及文件**：`scripts/Restart-HermesGoServices.ps1`、`scripts/smoke_web_search_desktop.py`、`tui_gateway/server.py`
+
+### 2026-05-23 — DeepSeek Desktop 仍用 python3 urllib 而非 web_search
+- **现象**：Desktop 问联网事实时出现 `python3 -c "import urllib..."`；`web_search` 已装且冒烟通过
+- **错误做法**：❌ 只装 ddgs 不加 `deepseek` 到 `TOOL_USE_ENFORCEMENT_MODELS`；❌ 绿色包仍 `tool_use_enforcement: auto`
+- **正确做法**：✅ `TOOL_USE_ENFORCEMENT_MODELS` 含 `deepseek`；✅ slim `agent.tool_use_enforcement: true`；✅ `_hermesgo_green_web_search_hint` 禁止 `python3 -c`/urllib 模拟搜索；✅ 改 prompt 后 `Restart-HermesGoServices.ps1` + **新开会话**
+- **涉及文件**：`agent/prompt_builder.py`、`packaging/config.yaml.slim-default`
+
+### 2026-05-23 — web_search 须打进 zip 且构建时冒烟
+- **现象**：用户要求「把 web_search 安装进去」；Desktop 仍 curl；测试树与 zip 不一致
+- **错误做法**：❌ 只改 `web_tools.py` 不重打 zip；❌ `verify_zip` 仅查 `ddgs/` 不查 `web_tools` 与 `web_search_tool` 可调用；❌ sync 时 `kanban.db` 被占用仍强删整棵 `app/`
+- **正确做法**：✅ `packaging/verify_zip_web_search.py` 在 `build_zip_slim` 后校验 zip 含 `_ddgs_search` 且 `web_search_tool` 冒烟通过；✅ `.hermesgo-green` 标记 `bundled_extras=...,web_search`；✅ `ensure_portable_web_search_installed()` 首启合并 ddgs+config+`check_web_api_key`；✅ sync 前先 `Restart-HermesGoServices.ps1`，锁库失败则只覆盖 `runtime/hermes-agent` 等关键文件
+- **涉及文件**：`packaging/verify_zip_web_search.py`、`portable_bootstrap.py`、`build_zip_slim.py`
+
+### 2026-05-20 — Kanban Dashboard 插件静态资源缺失导致 4UI 冒烟失败
+- **现象**：`smoke_kanban_all_ui.py` 中 Desktop 远端检查 `/dashboard-plugins/kanban/dist/index.js` 与 `style.css` 返回 404
+- **错误做法**：❌ 仅恢复 `plugins/kanban/dashboard/manifest.json` 与 `plugin_api.py`，遗漏 `dashboard/dist/*`
+- **正确做法**：✅ 确保 `runtime/hermes-agent/plugins/kanban/dashboard/dist/index.js` 与 `dist/style.css` 在打包前存在；若工作区恢复后缺失，先从可用 release 包回填再执行 `build_zip_slim.py`
+- **涉及文件**：`runtime/hermes-agent/plugins/kanban/dashboard/dist/*`、`build_zip_slim.py`、`scripts/smoke_kanban_all_ui.py`

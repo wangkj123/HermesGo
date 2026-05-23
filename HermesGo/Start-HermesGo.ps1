@@ -112,9 +112,75 @@ function Get-PortablePathList {
     return [string]::Join(";", $parts.ToArray())
 }
 
+function Test-PortableStrictMode {
+    # Green zip: plug-and-play under package dir only. Set HERMESGO_ALLOW_HOST=1 to opt into host profile/PATH.
+    if ($env:HERMESGO_ALLOW_HOST -eq '1') {
+        return $false
+    }
+    return $true
+}
+
+function Set-PortableStrictEnvironment {
+    $env:HERMESGO_STRICT_PORTABLE = '1'
+    $env:HERMES_PORTABLE_STRICT = '1'
+    $env:HERMESGO_SKIP_GLOBAL_PATH = '1'
+}
+
+function Add-HermesGreenRuntimeEnv {
+    param([hashtable]$Target)
+
+    if ($null -eq $Target) {
+        return @{}
+    }
+    $Target['HERMES_DISABLE_WSL'] = '1'
+    $Target['HERMES_PREFER_WINDOWS'] = '1'
+    $Target['HERMES_PORTABLE_APP_ROOT'] = $root
+    # Host tools (Cursor/CI) often set NO_COLOR=1 — restore Hermes gold CLI theme.
+    $Target['HERMES_FORCE_COLOR'] = '1'
+    $Target['NO_COLOR'] = ''
+    $Target['FORCE_COLOR'] = '1'
+    $Target['TERM'] = 'xterm-256color'
+    $Target['COLORTERM'] = 'truecolor'
+    if (Test-PortableStrictMode) {
+        $Target['HERMESGO_STRICT_PORTABLE'] = '1'
+        $Target['HERMES_PORTABLE_STRICT'] = '1'
+        $Target['HERMESGO_SKIP_GLOBAL_PATH'] = '1'
+    }
+    return $Target
+}
+
+function Ensure-PortableGreenMarker {
+    param([string]$AppRoot)
+
+    $marker = Join-Path $AppRoot ".hermesgo-green"
+    if (-not (Test-Path -LiteralPath $marker)) {
+        $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        @(
+            "hermesgo-green-portable=1"
+            "strict=1"
+            "windows-only=1"
+            "created=$stamp"
+        ) | Set-Content -LiteralPath $marker -Encoding utf8
+    }
+}
+
+function Set-PortableOfflineBundleEnv {
+    param([string]$AppRoot)
+
+    $marker = Join-Path $AppRoot ".hermesgo-green"
+    if (-not (Test-Path -LiteralPath $marker)) {
+        return
+    }
+    $text = Get-Content -LiteralPath $marker -Raw -Encoding utf8 -ErrorAction SilentlyContinue
+    if ($text -match '(?m)^no_pip_download=1\s*$') {
+        $env:HERMESGO_NO_PIP_DOWNLOAD = '1'
+    }
+}
+
 function Set-PortableProcessEnvironment {
     param([string]$AppRoot)
 
+    Set-PortableOfflineBundleEnv -AppRoot $AppRoot
     Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
     Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
     Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
@@ -122,13 +188,55 @@ function Set-PortableProcessEnvironment {
     $env:PATH = Get-PortablePathList -AppRoot $AppRoot
     $env:HERMES_PORTABLE_APP_ROOT = $AppRoot
     $env:HERMES_HOME = Join-Path $AppRoot "home"
+    $optionalSkills = Join-Path $AppRoot "optional-skills"
+    if (Test-Path -LiteralPath $optionalSkills) {
+        $env:HERMES_OPTIONAL_SKILLS = $optionalSkills
+    }
     $env:OLLAMA_MODELS = Join-Path $AppRoot "data\ollama\models"
     $env:PYTHONUTF8 = "1"
     $env:PYTHONIOENCODING = "utf-8"
+    # Green launcher: every Hermes child (gateway, dashboard, WebUI, Desktop, cmd hermes) disables WSL paths.
+    $env:HERMES_DISABLE_WSL = '1'
+    $env:HERMES_PREFER_WINDOWS = '1'
+    if (Test-PortableStrictMode) {
+        Set-PortableStrictEnvironment
+        Ensure-PortableGreenMarker -AppRoot $AppRoot
+    }
+
+    $globalPathCandidates = @(
+        (Join-Path $PSScriptRoot "Ensure-HermesGoGlobalPath.ps1"),
+        (Join-Path $PSScriptRoot "scripts\Ensure-HermesGoGlobalPath.ps1"),
+        (Join-Path $AppRoot "scripts\Ensure-HermesGoGlobalPath.ps1")
+    )
+    $globalPathScript = $null
+    foreach ($candidate in $globalPathCandidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            $globalPathScript = $candidate
+            break
+        }
+    }
+    if ($globalPathScript) {
+        . $globalPathScript
+        $logLine = if (Get-Command Write-LauncherLine -ErrorAction SilentlyContinue) {
+            ${function:Write-LauncherLine}
+        } else {
+            { param($Message) Write-Host $Message }
+        }
+        if (Test-PortableStrictMode) {
+            Ensure-PortableHermesCliWrapper -AppRoot $AppRoot -LogLine $logLine
+            & $logLine "Strict portable: CLI wrapper only (no host PATH/HERMES_HOME writes). Use app\runtime\bin\hermes.cmd"
+        } else {
+            Ensure-HermesGoGlobalPath -AppRoot $AppRoot -LogLine $logLine
+        }
+    }
 }
 
 function Ensure-PortableAuthFromProfile {
     param([string]$AppRoot)
+
+    if (Test-PortableStrictMode) {
+        return
+    }
 
     $portableAuth = Join-Path $AppRoot "home\auth.json"
     if (Test-Path -LiteralPath $portableAuth) {
@@ -259,6 +367,58 @@ terminal:
 "@
     Set-Content -LiteralPath $configPath -Value $defaultConfig -Encoding utf8
     Write-LauncherLine "Created built-in slim default config: $configPath"
+}
+
+function Ensure-PortableStrictConfig {
+    param(
+        [string]$AppRoot,
+        [string]$WorkspaceDir
+    )
+
+    if (-not (Test-PortableStrictMode)) {
+        return
+    }
+
+    $configPath = Join-Path $AppRoot "home\config.yaml"
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        return
+    }
+
+    $configText = Get-Content -LiteralPath $configPath -Raw -Encoding utf8
+    $escapedWs = ($WorkspaceDir -replace '\\', '/')
+    $updated = $configText
+
+    if ($updated -notmatch '(?m)^\s*portable:\s*$') {
+        $updated = $updated.TrimEnd() + @"
+
+# Green portable: all data under this USB/folder copy (no host ~/.hermes)
+portable:
+  strict: true
+  windows_only: true
+  disable_wsl: true
+
+"@
+    }
+
+    if ($updated -notmatch '(?m)^\s*backend:\s*"?local"?') {
+        if ($updated -match '(?m)^terminal:\s*$') {
+            $updated = [regex]::Replace($updated, '(?m)^(terminal:\s*)$', "`${1}`n  backend: `"local`"")
+        }
+    }
+
+    if ($updated -match '(?m)^\s*cwd:\s*') {
+        $updated = [regex]::Replace(
+            $updated,
+            '(?m)^(\s*cwd:\s*).*$',
+            "`${1}`"$escapedWs`"",
+            1
+        )
+    }
+
+    if ($updated -ne $configText) {
+        Set-Content -LiteralPath $configPath -Value $updated -Encoding utf8
+        Write-LauncherLine "Applied strict portable config (Windows local terminal, workspace cwd)"
+    }
 }
 
 function Start-ProcessWithEnvironment {
@@ -613,10 +773,12 @@ function Get-HermesEnvValue {
         return $value.Trim()
     }
 
-    foreach ($scope in @("User", "Machine")) {
-        $value = [Environment]::GetEnvironmentVariable($Key, $scope)
-        if (-not [string]::IsNullOrWhiteSpace($value)) {
-            return $value.Trim()
+    if (-not (Test-PortableStrictMode)) {
+        foreach ($scope in @("User", "Machine")) {
+            $value = [Environment]::GetEnvironmentVariable($Key, $scope)
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                return $value.Trim()
+            }
         }
     }
 
@@ -647,6 +809,19 @@ function Get-HermesEnvValue {
     return ""
 }
 
+function Write-Utf8NoBomFile {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+    $parent = Split-Path -Parent $Path
+    if ($parent) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+
 function Read-DotEnvFile {
     param([string]$Path)
 
@@ -660,7 +835,7 @@ function Read-DotEnvFile {
             continue
         }
         $parts = $trimmed.Split("=", 2)
-        $name = $parts[0].Trim()
+        $name = $parts[0].Trim().TrimStart([char]0xFEFF)
         $value = $parts[1].Trim().Trim('"').Trim("'")
         if ($name) {
             $result[$name] = $value
@@ -700,14 +875,18 @@ function Set-DotEnvValue {
     if ($parent) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
-    Set-Content -LiteralPath $Path -Value ($lines -join "`n") -Encoding utf8
+    Write-Utf8NoBomFile -Path $Path -Content ($lines -join "`n")
 }
 
 function Merge-PortableEnvFromKnownSources {
     $portableEnv = Join-Path $homeDir ".env"
     $current = Read-DotEnvFile -Path $portableEnv
-    $sources = @(
-        (Join-Path $env:USERPROFILE ".hermes\.env"),
+    $sources = @()
+    if (-not (Test-PortableStrictMode)) {
+        $sources += (Join-Path $env:USERPROFILE ".hermes\.env")
+    }
+    $sources += @(
+        (Join-Path $root "home\.env"),
         (Join-Path $root "..\home\.env"),
         (Join-Path $root "..\..\HermesGo\home\.env"),
         (Join-Path (Split-Path -Parent (Split-Path -Parent $root)) "HermesGo\home\.env")
@@ -733,11 +912,13 @@ function Merge-PortableEnvFromKnownSources {
             Write-LauncherLine "Imported DEEPSEEK_API_KEY from HERMESGO_DEEPSEEK_API_KEY"
         }
     }
-    $deepseekFromProfile = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
-    if (-not [string]::IsNullOrWhiteSpace($deepseekFromProfile) -and [string]::IsNullOrWhiteSpace($current["DEEPSEEK_API_KEY"])) {
-        $current["DEEPSEEK_API_KEY"] = $deepseekFromProfile
-        $merged = $true
-        Write-LauncherLine "Persisted DEEPSEEK_API_KEY from profile/env into portable .env"
+    if (-not (Test-PortableStrictMode)) {
+        $deepseekFromProfile = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
+        if (-not [string]::IsNullOrWhiteSpace($deepseekFromProfile) -and [string]::IsNullOrWhiteSpace($current["DEEPSEEK_API_KEY"])) {
+            $current["DEEPSEEK_API_KEY"] = $deepseekFromProfile
+            $merged = $true
+            Write-LauncherLine "Persisted DEEPSEEK_API_KEY from profile/env into portable .env"
+        }
     }
     if ($merged) {
         $lines = @(
@@ -750,7 +931,7 @@ function Merge-PortableEnvFromKnownSources {
                 $lines += "$($entry.Key)=$($entry.Value)"
             }
         }
-        Set-Content -LiteralPath $portableEnv -Value ($lines -join "`n") -Encoding utf8
+        Write-Utf8NoBomFile -Path $portableEnv -Content ($lines -join "`n")
     }
 }
 
@@ -760,11 +941,74 @@ function Import-PortableDotEnv {
         return
     }
 
+    # Never override Windows/shell-reserved vars (HOME is readonly under some WSL/Cursor hosts).
+    $reservedKeys = @(
+        "HOME", "USERPROFILE", "PATH", "PATHEXT", "TEMP", "TMP", "OS", "COMSPEC",
+        "WINDIR", "SYSTEMROOT", "PSHOME", "PSMODULEPATH", "PROCESSOR_ARCHITECTURE"
+    )
+
     foreach ($entry in (Read-DotEnvFile -Path $envPath).GetEnumerator()) {
+        if ($reservedKeys -contains $entry.Key) {
+            continue
+        }
         if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($entry.Key, "Process"))) {
-            Set-Item -Path ("Env:" + $entry.Key) -Value $entry.Value
+            try {
+                Set-Item -Path ("Env:" + $entry.Key) -Value $entry.Value -ErrorAction Stop
+            } catch {
+                Write-LauncherLine "Skipped .env key $($entry.Key): $($_.Exception.Message)"
+            }
         }
     }
+}
+
+function Write-PortableShellEnvBootstrap {
+    param([string]$AppRoot)
+
+    $appHome = Join-Path $AppRoot "home"
+    $binDir = Join-Path $AppRoot "runtime\bin"
+    $pythonExe = Join-Path $AppRoot "runtime\python311\python.exe"
+    $bootstrap = Join-Path $appHome "portable-shell-init.cmd"
+    $escapedRoot = $AppRoot -replace '\\', '\\'
+    $escapedHome = $appHome -replace '\\', '\\'
+    $escapedBin = $binDir -replace '\\', '\\'
+    $escapedPy = $pythonExe -replace '\\', '\\'
+
+    $lines = @(
+        "@echo off",
+        "setlocal EnableExtensions",
+        "set `"HERMESGO_APP=$escapedRoot`"",
+        "set `"HERMES_PORTABLE_APP_ROOT=$escapedRoot`"",
+        "set `"HERMES_HOME=$escapedHome`"",
+        "set `"HERMESGO_STRICT_PORTABLE=1`"",
+        "set `"HERMES_PORTABLE_STRICT=1`"",
+        "set `"HERMESGO_SKIP_GLOBAL_PATH=1`"",
+        "set `"HERMES_DISABLE_WSL=1`"",
+        "set `"HERMES_PREFER_WINDOWS=1`"",
+        "set `"HERMES_FORCE_COLOR=1`"",
+        "set `"NO_COLOR=`"",
+        "set `"FORCE_COLOR=1`"",
+        "set `"TERM=xterm-256color`"",
+        "set `"COLORTERM=truecolor`"",
+        "set `"PYTHONUTF8=1`"",
+        "set `"PYTHONIOENCODING=utf-8`""
+    )
+    if (Test-Path -LiteralPath $binDir) {
+        $lines += "set `"PATH=$escapedBin;%PATH%`""
+    }
+    $envPath = Join-Path $appHome ".env"
+    if (Test-Path -LiteralPath $envPath) {
+        foreach ($entry in (Read-DotEnvFile -Path $envPath).GetEnumerator()) {
+            if ([string]::IsNullOrWhiteSpace($entry.Value)) {
+                continue
+            }
+            if ($entry.Key -match '(_API_KEY|_TOKEN|_SECRET|_KEY|_BASE_URL)$') {
+                $safeVal = $entry.Value -replace '%', '%%' -replace '"', '\"'
+                $lines += "set `"$($entry.Key)=$safeVal`""
+            }
+        }
+    }
+    Set-Content -LiteralPath $bootstrap -Value ($lines -join "`r`n") -Encoding ascii
+    Write-LauncherLine "Wrote shell bootstrap: $bootstrap"
 }
 
 function Get-PortableSecretEnv {
@@ -799,7 +1043,7 @@ function Ensure-PortableDeepSeekEnvTemplate {
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 "@
-    Set-Content -LiteralPath $envPath -Value $template -Encoding utf8
+    Write-Utf8NoBomFile -Path $envPath -Content $template
     Write-LauncherLine "Created app\home\.env template for DEEPSEEK_API_KEY"
 }
 
@@ -1017,6 +1261,59 @@ print('kanban init ok')
     }
 }
 
+function Invoke-PortablePythonBootstrap {
+    param([string]$AppRoot)
+
+    $agentRoot = Join-Path $AppRoot "runtime\hermes-agent"
+    $bootstrap = @"
+import sys
+sys.path.insert(0, r'$agentRoot')
+from hermes_cli.portable_bootstrap import ensure_portable_exe_ready
+summary = ensure_portable_exe_ready()
+for key, value in sorted(summary.items()):
+    if value:
+        print(f'  {key}: {value}')
+"@
+    $bootOut = & $pythonExe -c $bootstrap 2>&1
+    foreach ($line in @($bootOut)) {
+        if ($line) { Write-LauncherLine $line }
+    }
+}
+
+function Initialize-HermesGoPortablePackage {
+    param([string]$AppRoot)
+
+    # Single entry for HermesGo.exe / HermesGo.bat: layout, config, .env, CLI wrapper, shell init, Python bootstrap.
+    Set-PortableProcessEnvironment -AppRoot $AppRoot
+    Apply-ProxyBypassEnvironment
+    Ensure-PortableAuthFromProfile -AppRoot $AppRoot
+    Ensure-PortableHomeConfig -AppRoot $AppRoot
+    $layout = Ensure-PortableLayout -AppRoot $AppRoot
+    Ensure-PortableStrictConfig -AppRoot $AppRoot -WorkspaceDir $layout.WorkspaceDir
+    Ensure-PortableDeepSeekEnvTemplate
+    Merge-PortableEnvFromKnownSources
+    Import-PortableDotEnv
+    Write-PortableShellEnvBootstrap -AppRoot $AppRoot
+    try {
+        Invoke-PortablePythonBootstrap -AppRoot $AppRoot
+    } catch {
+        Write-LauncherLine "Portable Python bootstrap skipped: $($_.Exception.Message)"
+    }
+    Apply-CloudPreferredRouteIfAvailable
+
+    $readyMarker = Join-Path $AppRoot ".hermesgo-ready"
+    @(
+        "configured_at=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+        "hermes_home=$($env:HERMES_HOME)",
+        "portable_root=$($env:HERMES_PORTABLE_APP_ROOT)",
+        "windows_only=1",
+        "disable_wsl=1"
+    ) | Set-Content -LiteralPath $readyMarker -Encoding utf8
+    Write-LauncherLine "Portable package fully configured (HERMES_HOME=$($env:HERMES_HOME))."
+    Write-LauncherLine "CLI: $AppRoot\runtime\bin\hermes.cmd | Shell init: $AppRoot\home\portable-shell-init.cmd"
+    return $layout
+}
+
 function Start-GatewayProcess {
     if (Test-GatewayRunning) {
         Write-LauncherLine "Hermes gateway already running for profile: $homeDir"
@@ -1045,6 +1342,7 @@ function Start-GatewayProcess {
         OLLAMA_MODELS             = $ollamaModelsDir
         NO_PROXY                  = $env:NO_PROXY
     }
+    $gatewayEnv = Add-HermesGreenRuntimeEnv -Target $gatewayEnv
     $gatewayEnv = Add-PortableSecretEnv -Target $gatewayEnv
     $savedGatewayEnv = @{}
     foreach ($key in $gatewayEnv.Keys) {
@@ -1210,6 +1508,8 @@ function Start-DashboardProcess {
     $env:PYTHONUTF8 = "1"
     $env:PYTHONIOENCODING = "utf-8"
     $env:HERMES_DASHBOARD_TUI = "1"
+    $env:HERMES_DISABLE_WSL = '1'
+    $env:HERMES_PREFER_WINDOWS = '1'
     foreach ($entry in (Get-PortableSecretEnv).GetEnumerator()) {
         Set-Item -Path ("Env:" + $entry.Key) -Value $entry.Value
     }
@@ -1335,6 +1635,7 @@ function Start-WebUIProcess {
         PYTHONIOENCODING       = "utf-8"
         NO_PROXY               = $env:NO_PROXY
     }
+    $webuiEnv = Add-HermesGreenRuntimeEnv -Target $webuiEnv
     $webuiEnv = Add-PortableSecretEnv -Target $webuiEnv
     $savedWebuiEnv = @{}
     foreach ($key in $webuiEnv.Keys) {
@@ -1423,6 +1724,7 @@ function Start-HermesDesktopProcess {
         HERMES_DESKTOP_REMOTE_TOKEN  = $dashboardToken
         ELECTRON_RUN_AS_NODE         = $null
     }
+    $desktopEnv = Add-HermesGreenRuntimeEnv -Target $desktopEnv
     $desktopEnv = Add-PortableSecretEnv -Target $desktopEnv
 
     $process = Start-ProcessWithEnvironment `
@@ -1489,11 +1791,26 @@ function Start-ChatWindow {
     }
 
     $portablePath = Get-PortablePathList -AppRoot $root
+    $shellInit = Join-Path $homeDir "portable-shell-init.cmd"
+    $initSegment = ""
+    if (Test-Path -LiteralPath $shellInit) {
+        $initSegment = '&&call "' + $shellInit + '"'
+    }
     $command = 'set PYTHONHOME=' +
         '&&set PYTHONPATH=' +
         '&&set VIRTUAL_ENV=' +
         '&&set PATH=' + $portablePath +
         '&&set HERMES_HOME=' + $homeDir +
+        '&&set HERMES_PORTABLE_APP_ROOT=' + $root +
+        '&&set HERMES_DISABLE_WSL=1' +
+        '&&set HERMES_PREFER_WINDOWS=1' +
+        '&&set HERMES_FORCE_COLOR=1' +
+        '&&set NO_COLOR=' +
+        '&&set FORCE_COLOR=1' +
+        '&&set TERM=xterm-256color' +
+        '&&set COLORTERM=truecolor' +
+        '&&set HERMESGO_STRICT_PORTABLE=1' +
+        '&&set HERMES_PORTABLE_STRICT=1' +
         '&&set OLLAMA_MODELS=' + $ollamaModelsDir +
         '&&set NO_PROXY=' + $env:NO_PROXY +
         '&&set no_proxy=' + $env:no_proxy +
@@ -1501,6 +1818,7 @@ function Start-ChatWindow {
         '&&set PYTHONIOENCODING=utf-8' +
         '&&chcp 65001>nul' +
         '&&title HermesGo Chat' +
+        $initSegment +
         '&&"' + $pythonExe + '" -m hermes_cli.main'
 
     $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $command -WorkingDirectory $root -PassThru
@@ -1603,40 +1921,16 @@ try {
         }
     }
 
-    Set-PortableProcessEnvironment -AppRoot $root
-    Apply-ProxyBypassEnvironment
-    Ensure-PortableAuthFromProfile -AppRoot $root
-    Ensure-PortableHomeConfig -AppRoot $root
-    $portableLayout = Ensure-PortableLayout -AppRoot $root
+    $portableLayout = Initialize-HermesGoPortablePackage -AppRoot $root
     $workspaceDir = $portableLayout.WorkspaceDir
-    Ensure-PortableDeepSeekEnvTemplate
-    Merge-PortableEnvFromKnownSources
-    Import-PortableDotEnv
     $deepseekKey = Get-HermesEnvValue -Key "DEEPSEEK_API_KEY"
     if ([string]::IsNullOrWhiteSpace($deepseekKey)) {
-        Write-LauncherLine "WARNING: DEEPSEEK_API_KEY missing — UIs may spin on loading. Set app\home\.env or paste in http://127.0.0.1:9119/env"
+        Write-LauncherLine "WARNING: DEEPSEEK_API_KEY missing — paste key in http://127.0.0.1:9119/env or app\home\.env"
     } else {
         Write-LauncherLine "DEEPSEEK_API_KEY loaded (len=$($deepseekKey.Length))"
     }
-    try {
-        $agentRoot = Join-Path $root "runtime\hermes-agent"
-        $bootstrap = @"
-import sys
-sys.path.insert(0, r'$agentRoot')
-from hermes_cli.portable_bootstrap import ensure_portable_deepseek_route
-if ensure_portable_deepseek_route():
-    print('Aligned config.yaml with DeepSeek (portable; Codex not used)')
-"@
-        $bootOut = & $pythonExe -c $bootstrap 2>&1
-        foreach ($line in @($bootOut)) {
-            if ($line) { Write-LauncherLine $line }
-        }
-    } catch {
-        Write-LauncherLine "Codex config bootstrap skipped: $($_.Exception.Message)"
-    }
     Write-LauncherLine ("Portable PATH: " + $env:PATH)
-    Write-LauncherLine "Portable target: standard Hermes runtime with portable Python only (no system Python on PATH)."
-    Apply-CloudPreferredRouteIfAvailable
+    Write-LauncherLine "Portable target: Windows + bundled Python only (no WSL)."
 
     Start-GatewayProcess
     Ensure-KanbanDatabase -RuntimeDir $runtimeDir -PythonExe $pythonExe -AppRoot $root -HomeDir $homeDir

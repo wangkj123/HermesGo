@@ -14,8 +14,9 @@ QUICK START / 快速开始
 Extract the whole HermesGo folder to an English path (not only HermesGo.exe).
 将整个 HermesGo 文件夹解压到英文路径（不要只复制 HermesGo.exe）。
 
-Double-click HermesGo.exe — same as HermesGo.bat (Dashboard + WebUI + Desktop).
-双击 HermesGo.exe — 与 HermesGo.bat 相同（Dashboard + WebUI + Desktop）。
+Double-click HermesGo.exe — configures everything automatically (same as HermesGo.bat):
+portable home/config/.env, hermes.cmd, shell init, gateway, Dashboard 9119, WebUI 8787, Desktop.
+双击 HermesGo.exe 即自动完成全部配置（等同 HermesGo.bat）：app\home、hermes.cmd、网关与三件套 UI。
 
 HermesWebUI.bat — chat / Kanban only at http://127.0.0.1:8787
 HermesWebUI.bat — 仅聊天 / 看板 http://127.0.0.1:8787
@@ -23,8 +24,18 @@ HermesWebUI.bat — 仅聊天 / 看板 http://127.0.0.1:8787
 HermesDesktop.bat — Electron desktop app only
 HermesDesktop.bat — 仅 Electron 桌面端
 
+HermesVSCode.bat — start Microsoft Visual Studio Code (Hermes green, VS Code only)
+HermesVSCode.bat — 启动 Visual Studio Code 绿色编程版（仅 VS Code，非 Cursor）
+
 HermesGo.exe --menu — optional launcher menu (verify, update, open folders)
 HermesGo.exe --menu — 可选启动菜单（自检、更新、打开目录）
+
+Green strict mode (default): config/auth/logs stay under app\home on this USB/folder only.
+绿色严格模式（默认）：配置/登录/日志仅保存在本目录 app\home，不写主机 ~/.hermes。
+CLI in Desktop shell: app\runtime\bin\hermes.cmd (or full path). Hermes green runs on native Windows only (bundled python.exe); no WSL required. This does NOT affect Cursor or other apps.
+Desktop 终端用 app\runtime\bin\hermes.cmd；Hermes 绿色版仅原生 Windows+包内 Python，不依赖 WSL（用户机一般未装 WSL）；与 Cursor 无关。
+Optional host PATH: set HERMESGO_ALLOW_HOST=1 before launch (not recommended for plug-and-play).
+可选写入主机 PATH：启动前设 HERMESGO_ALLOW_HOST=1（即插即用请勿开启）。
 
 Verify-HermesGo.bat — self-check (under app\scripts\, run from package root shortcuts if added)
 自检：运行 app\scripts\Verify-HermesGo.bat（见下方目录说明）
@@ -48,6 +59,9 @@ HermesWebUI.bat       仅 WebUI
 HermesDesktop.bat     Desktop only
 HermesDesktop.bat     仅 Desktop
 
+HermesVSCode.bat      Open VS Code with Hermes (see app\docs\VSCODE-GREEN.md)
+HermesVSCode.bat      打开 VS Code 并使用 Hermes（见 app\docs\VSCODE-GREEN.md）
+
 Everything else lives under app\ — do not add loose files at package root.
 其余文件均在 app\ 下 — 请勿在包根目录堆放杂项文件。
 
@@ -64,8 +78,8 @@ app\tools\            内置 codex.cmd 兼容入口（非外部 Codex 安装）
 app\assets\           HermesGo-logo.png, icons\HermesGo.ico
 app\assets\           启动器用图标与 Logo
 
-app\docs\             PACKAGE-SLIM.md (package notes)
-app\docs\             PACKAGE-SLIM.md（包说明）
+app\docs\             PACKAGE-SLIM.md, VSCODE-GREEN.md (package + VS Code green)
+app\docs\             PACKAGE-SLIM.md、VSCODE-GREEN.md（包说明与 VS Code 绿色版）
 
 app\runtime\          python311, hermes-agent, hermes-webui, hermes-desktop, bin
 app\runtime\          便携 Python、Agent、WebUI、Desktop 运行时

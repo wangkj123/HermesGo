@@ -50,13 +50,54 @@ def get_portable_app_root() -> Path | None:
     return None
 
 
+def is_portable_strict() -> bool:
+    """True for green HermesGo: all state under the package, no host profile writes."""
+    raw = (
+        os.environ.get("HERMES_PORTABLE_STRICT", "").strip()
+        or os.environ.get("HERMESGO_STRICT_PORTABLE", "").strip()
+    )
+    if raw.lower() in ("1", "true", "yes", "on"):
+        return True
+    if raw.lower() in ("0", "false", "no", "off"):
+        return False
+    app_root = get_portable_app_root()
+    if app_root is not None and (app_root / ".hermesgo-green").is_file():
+        return True
+    return False
+
+
+def hermes_green_windows_only() -> bool:
+    """True when HermesGo green portable must not use WSL code paths (all entrypoints)."""
+    raw = os.environ.get("HERMES_DISABLE_WSL", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if is_portable_strict():
+        return True
+    return get_portable_app_root() is not None
+
+
+def ensure_hermes_green_windows_env() -> None:
+    """Set env flags so gateway/CLI/terminal never treat the host as WSL."""
+    if not hermes_green_windows_only():
+        return
+    os.environ["HERMES_DISABLE_WSL"] = "1"
+    os.environ.setdefault("HERMES_PREFER_WINDOWS", "1")
+
+
 def detect_portable_hermes_home() -> Path | None:
     """Return ``app/home`` for HermesGo portable layout when HERMES_HOME is unset."""
     app_root = get_portable_app_root()
     if app_root is None:
         return None
     portable_home = app_root / "home"
-    return portable_home if portable_home.is_dir() else None
+    if portable_home.is_dir():
+        return portable_home
+    if is_portable_strict():
+        portable_home.mkdir(parents=True, exist_ok=True)
+        return portable_home
+    return None
 
 
 def ensure_portable_hermes_home_env() -> Path:
@@ -68,6 +109,11 @@ def ensure_portable_hermes_home_env() -> Path:
     if detected is not None:
         os.environ["HERMES_HOME"] = str(detected)
         return detected
+    if is_portable_strict():
+        raise RuntimeError(
+            "HERMES_PORTABLE_STRICT: could not resolve portable app/home "
+            "(set HERMES_HOME or HERMES_PORTABLE_APP_ROOT to the green package app/ directory)"
+        )
     return Path.home() / ".hermes"
 
 
@@ -75,6 +121,7 @@ def get_hermes_home() -> Path:
     """Return the Hermes home directory (default: ~/.hermes).
 
     Reads HERMES_HOME env var, falls back to ~/.hermes, then HermesGo ``app/home``.
+    Green strict mode never uses ``~/.hermes``.
     This is the single source of truth — all other copies should import this.
     """
     env_home = os.getenv("HERMES_HOME", "").strip()
@@ -83,6 +130,8 @@ def get_hermes_home() -> Path:
     detected = detect_portable_hermes_home()
     if detected is not None:
         return detected
+    if is_portable_strict():
+        return ensure_portable_hermes_home_env()
     return Path.home() / ".hermes"
 
 
@@ -253,6 +302,8 @@ def is_wsl() -> bool:
     and WSL2 inject.  Result is cached for the process lifetime.
     Import-safe — no heavy deps.
     """
+    if hermes_green_windows_only():
+        return False
     global _wsl_detected
     if _wsl_detected is not None:
         return _wsl_detected

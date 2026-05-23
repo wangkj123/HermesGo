@@ -641,6 +641,19 @@ def _toolset_has_keys(ts_key: str, config: dict = None) -> bool:
         except Exception:
             return False
 
+    if ts_key == "web":
+        web_cfg = config.get("web")
+        if isinstance(web_cfg, dict):
+            backend = str(web_cfg.get("backend") or "").strip().lower()
+            if backend == "duckduckgo":
+                try:
+                    from tools.web_tools import _ddgs_available
+
+                    if _ddgs_available():
+                        return True
+                except Exception:
+                    pass
+
     if ts_key in {"web", "image_gen", "tts", "browser"}:
         features = get_nous_subscription_features(config)
         feature = features.features.get(ts_key)

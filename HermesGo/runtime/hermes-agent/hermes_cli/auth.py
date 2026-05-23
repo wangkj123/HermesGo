@@ -1742,6 +1742,140 @@ def _build_codex_oauth_redirect_uri(port: int) -> str:
     return f"http://{CODEX_OAUTH_REDIRECT_HOST}:{port}{CODEX_OAUTH_REDIRECT_PATH}"
 
 
+CODEX_BROWSER_REDIRECT_URI = _build_codex_oauth_redirect_uri(CODEX_OAUTH_REDIRECT_PORT)
+
+
+def _generate_codex_pkce() -> tuple[str, str]:
+    """PKCE verifier/challenge for Dashboard browser Codex OAuth."""
+    return _generate_pkce_pair()
+
+
+def _build_codex_browser_auth_url(
+    challenge: str,
+    state: str,
+    redirect_uri: Optional[str] = None,
+) -> str:
+    redirect = (redirect_uri or CODEX_BROWSER_REDIRECT_URI).strip()
+    params = {
+        "response_type": "code",
+        "client_id": CODEX_OAUTH_CLIENT_ID,
+        "redirect_uri": redirect,
+        "scope": CODEX_OAUTH_SCOPE,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "id_token_add_organizations": "true",
+        "codex_cli_simplified_flow": "true",
+        "state": state,
+        "originator": CODEX_OAUTH_ORIGINATOR,
+    }
+    return f"{CODEX_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+def _codex_browser_login_handler_factory(expected_state: str) -> type[BaseHTTPRequestHandler]:
+    callback_path = CODEX_OAUTH_REDIRECT_PATH
+
+    class _CodexBrowserLoginHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            server = self.server  # type: ignore[attr-defined]
+            parsed = urlparse(self.path)
+            if parsed.path != callback_path:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            params = parse_qs(parsed.query)
+            code = params.get("code", [None])[0]
+            state = params.get("state", [None])[0]
+            error = params.get("error", [None])[0]
+
+            if error:
+                server.login_result = {
+                    "status": "error",
+                    "error_message": str(error),
+                    "code": None,
+                }
+            elif not code:
+                server.login_result = {
+                    "status": "error",
+                    "error_message": "No authorization code returned.",
+                    "code": None,
+                }
+            elif state != expected_state:
+                server.login_result = {
+                    "status": "error",
+                    "error_message": "OAuth callback state did not match the login request.",
+                    "code": None,
+                }
+            else:
+                server.login_result = {
+                    "status": "approved",
+                    "error_message": None,
+                    "code": str(code),
+                }
+
+            ok = server.login_result.get("status") == "approved"
+            body = (
+                "<html><body><h2>Authorization Successful</h2>"
+                "<p>You can close this tab and return to HermesGo.</p>"
+                "<script>window.close();</script></body></html>"
+                if ok
+                else "<html><body><h2>Authorization Failed</h2>"
+                f"<p>{server.login_result.get('error_message') or 'Authorization failed.'}</p></body></html>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            server.login_event.set()
+
+        def log_message(self, fmt: str, *args: Any) -> None:
+            logger.debug("Codex browser OAuth callback: " + fmt, *args)
+
+    return _CodexBrowserLoginHandler
+
+
+class _CodexBrowserLoginServer(HTTPServer):
+    """Loopback callback server used by Dashboard Codex OAuth."""
+
+    def __init__(self, server_address: tuple[str, int], RequestHandlerClass: type[BaseHTTPRequestHandler]):
+        super().__init__(server_address, RequestHandlerClass)
+        self.login_event = threading.Event()
+        self.login_result: Dict[str, Any] = {"status": "pending"}
+        self.redirect_uri = _build_codex_oauth_redirect_uri(int(self.server_address[1]))
+
+
+# IPv6 loopback alias (tests patch both classes for bind fallback).
+_CodexBrowserLoginServerV4 = _CodexBrowserLoginServer
+
+
+def _start_codex_browser_login_server(expected_state: str) -> _CodexBrowserLoginServer:
+    """Start local Codex OAuth callback listener (1455, then ephemeral port)."""
+    handler = _codex_browser_login_handler_factory(expected_state)
+    attempts: list[tuple[type[_CodexBrowserLoginServer], tuple[str, int]]] = [
+        (_CodexBrowserLoginServer, ("127.0.0.1", CODEX_OAUTH_REDIRECT_PORT)),
+        (_CodexBrowserLoginServer, ("127.0.0.1", 0)),
+        (_CodexBrowserLoginServerV4, ("::1", CODEX_OAUTH_REDIRECT_PORT)),
+        (_CodexBrowserLoginServerV4, ("::1", 0)),
+    ]
+    last_error: Optional[Exception] = None
+    for server_cls, address in attempts:
+        try:
+            return server_cls(address, handler)
+        except OSError as exc:
+            last_error = exc
+            continue
+    raise AuthError(
+        f"Local Codex OAuth callback server could not start: {last_error}",
+        provider="openai-codex",
+        code="oauth_callback_bind_failed",
+        relogin_required=True,
+    )
+
+
 def _create_codex_oauth_callback_server(*, preferred_port: Optional[int] = None) -> tuple[HTTPServer, str, Dict[str, Optional[str]], threading.Event]:
     callback_path = CODEX_OAUTH_REDIRECT_PATH
     result: Dict[str, Optional[str]] = {"code": None, "state": None, "error": None}

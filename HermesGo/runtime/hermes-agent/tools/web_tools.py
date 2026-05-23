@@ -88,7 +88,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "duckduckgo"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -117,7 +117,46 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "duckduckgo":
+        return _ddgs_available()
     return False
+
+
+def _ddgs_available() -> bool:
+    """True when bundled DuckDuckGo search (ddgs) is importable (HermesGo green, no API key)."""
+    try:
+        from ddgs import DDGS  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def _has_paid_web_backend() -> bool:
+    return any(
+        _is_backend_available(backend)
+        for backend in ("exa", "parallel", "firecrawl", "tavily")
+    )
+
+
+def _ddgs_search(query: str, limit: int) -> Dict[str, Any]:
+    """Free web search via DuckDuckGo (no Firecrawl/Tavily key)."""
+    from ddgs import DDGS
+
+    web: List[Dict[str, Any]] = []
+    with DDGS() as ddgs:
+        for position, item in enumerate(ddgs.text(query, max_results=max(1, min(limit, 20))), start=1):
+            if not isinstance(item, dict):
+                continue
+            web.append(
+                {
+                    "title": str(item.get("title") or ""),
+                    "url": str(item.get("href") or item.get("url") or ""),
+                    "description": str(item.get("body") or item.get("description") or ""),
+                    "position": position,
+                }
+            )
+    return {"success": True, "data": {"web": web}, "backend": "duckduckgo"}
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 
@@ -1081,6 +1120,20 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
+        configured = (_load_web_config().get("backend") or "").lower().strip()
+        use_ddgs = configured == "duckduckgo" or (
+            not _has_paid_web_backend() and _ddgs_available()
+        )
+        if use_ddgs:
+            logger.info("Web search via DuckDuckGo (ddgs): '%s' (limit: %d)", query, limit)
+            response_data = _ddgs_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
         # Dispatch to the configured backend
         backend = _get_backend()
         if backend == "parallel":
@@ -1919,11 +1972,13 @@ def check_firecrawl_api_key() -> bool:
 
 
 def check_web_api_key() -> bool:
-    """Check whether the configured web backend is available."""
+    """Check whether any web search backend is available (paid APIs or bundled ddgs)."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in ("exa", "parallel", "firecrawl", "tavily"):
+    if configured in ("exa", "parallel", "firecrawl", "tavily", "duckduckgo"):
         return _is_backend_available(configured)
-    return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tavily"))
+    if _has_paid_web_backend():
+        return True
+    return _ddgs_available()
 
 
 def check_auxiliary_model() -> bool:
@@ -2046,7 +2101,12 @@ from tools.registry import registry, tool_error
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "Search the web for information on any topic. Returns up to 5 relevant results with titles, URLs, and descriptions.",
+    "description": (
+        "Search the web for information on any topic (REQUIRED for internet lookup). "
+        "Returns titles, URLs, and snippets. "
+        "Do not use curl/wget instead of this tool for search or discovery. "
+        "HermesGo green uses DuckDuckGo when no paid search API key is configured."
+    ),
     "parameters": {
         "type": "object",
         "properties": {

@@ -1,6 +1,36 @@
 ﻿$ErrorActionPreference = "Stop"
 
-$root = $PSScriptRoot
+$globalPathScript = Join-Path $PSScriptRoot "scripts\Ensure-HermesGoGlobalPath.ps1"
+if (-not (Test-Path -LiteralPath $globalPathScript)) {
+    $globalPathScript = Join-Path $PSScriptRoot "Ensure-HermesGoGlobalPath.ps1"
+}
+if (Test-Path -LiteralPath $globalPathScript) {
+    . $globalPathScript
+    Register-HermesGoGlobalPathFromScriptRoot -ScriptRoot $PSScriptRoot
+}
+
+function Resolve-VerifyHermesAppRoot {
+    param([string]$ScriptRoot)
+    foreach ($candidate in @(
+            $ScriptRoot,
+            (Join-Path $ScriptRoot ".."),
+            (Join-Path $ScriptRoot "..\..")
+        )) {
+        $full = [System.IO.Path]::GetFullPath($candidate)
+        if (Test-Path -LiteralPath (Join-Path $full "runtime\python311\python.exe")) {
+            return $full
+        }
+    }
+    throw "Portable app root not found near $ScriptRoot"
+}
+
+$root = Resolve-VerifyHermesAppRoot -ScriptRoot $PSScriptRoot
+$env:HERMES_PORTABLE_APP_ROOT = $root
+$env:HERMES_HOME = Join-Path $root "home"
+$env:HERMES_DISABLE_WSL = "1"
+$env:HERMES_PREFER_WINDOWS = "1"
+$env:HERMESGO_STRICT_PORTABLE = "1"
+$env:HERMES_PORTABLE_STRICT = "1"
 $pythonExe = Join-Path $root "runtime\python311\python.exe"
 $runtimeBinDir = Join-Path $root "runtime\bin"
 $launcherLog = Join-Path $root "HermesGo-debug.txt"

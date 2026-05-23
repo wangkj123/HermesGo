@@ -81,6 +81,7 @@ internal sealed class HermesBootstrap
     private const string UpdateSourcesEnv = "HERMESGO_UPDATE_SOURCES";
     private const string UpdateTimeoutEnv = "HERMESGO_UPDATE_TIMEOUT_SEC";
     private const string UpdatePreviewListFileName = "update-preview.txt";
+    private const string SyncDestFileName = "sync-dest.txt";
     private const int UpdatePreviewDialogMaxLines = 200;
     private const string UseProxyEnv = "HERMESGO_UPDATE_USE_PROXY";
     private const byte VkControl = 0x11;
@@ -139,6 +140,7 @@ internal sealed class HermesBootstrap
         _logPath = Path.Combine(_contentRoot, "logs", "update", "HermesGo-bootstrap.log");
         _tmpRoot = Path.Combine(Path.GetTempPath(), "hg");
         _historyPath = Path.Combine(_contentRoot, "logs", "update", "HermesGo-source-history.log");
+        UiScreenAnchor.Capture(_root);
     }
 
     private static bool HasPlanOnlyFlag(IEnumerable<string> args)
@@ -496,7 +498,7 @@ internal sealed class HermesBootstrap
         using (var form = new Form())
         {
             form.Text = title;
-            form.StartPosition = FormStartPosition.CenterScreen;
+            UiScreenAnchor.PrepareForm(form);
             form.FormBorderStyle = FormBorderStyle.FixedDialog;
             form.MaximizeBox = false;
             form.MinimizeBox = false;
@@ -569,7 +571,7 @@ internal sealed class HermesBootstrap
         using (var form = new Form())
         {
             form.Text = title;
-            form.StartPosition = FormStartPosition.CenterScreen;
+            UiScreenAnchor.PrepareForm(form);
             form.FormBorderStyle = FormBorderStyle.Sizable;
             form.MaximizeBox = true;
             form.MinimizeBox = false;
@@ -2490,6 +2492,13 @@ internal sealed class HermesBootstrap
                     return true;
                 });
             };
+            form.SyncDirectoryChangeRequested += delegate
+            {
+                RunLauncherActionAsync(form, delegate
+                {
+                    return HandlePickSyncDirectory();
+                });
+            };
             form.OpenCustomActionsRequested += delegate
             {
                 RunLauncherActionAsync(form, delegate
@@ -3792,14 +3801,38 @@ internal sealed class HermesBootstrap
             return;
         }
 
+        var fullPath = path;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+        }
+        catch
+        {
+            fullPath = path;
+        }
+
+        if (!Directory.Exists(fullPath))
+        {
+            try
+            {
+                Directory.CreateDirectory(fullPath);
+            }
+            catch (Exception ex)
+            {
+                Log("open folder failed (missing path): " + fullPath + " — " + ex.Message);
+                return;
+            }
+        }
+
+        var targetScreen = UiScreenAnchor.GetScreen(fullPath);
+        var beforeExplorerIds = UiScreenAnchor.SnapshotExplorerProcessIds();
+
         var psi = new ProcessStartInfo
         {
-            FileName = "explorer.exe",
-            Arguments = Quote(path),
+            FileName = fullPath,
+            UseShellExecute = true,
+            Verb = "open",
             WorkingDirectory = _contentRoot,
-            UseShellExecute = false,
-            CreateNoWindow = false,
-            WindowStyle = ProcessWindowStyle.Normal,
         };
 
         if (_planOnly)
@@ -3808,12 +3841,128 @@ internal sealed class HermesBootstrap
                 "open-folder",
                 psi,
                 string.Empty,
-                new Dictionary<string, object> { { "path", path } });
+                new Dictionary<string, object> { { "path", fullPath } });
             return;
         }
 
-        TrackLaunchedProcess(Process.Start(psi));
-        Log("opened folder: " + path);
+        try
+        {
+            Process.Start(psi);
+            UiScreenAnchor.MoveNewExplorerWindowsToScreen(targetScreen, beforeExplorerIds);
+            Log("opened folder: " + fullPath);
+        }
+        catch (Exception ex)
+        {
+            Log("open folder failed: " + fullPath + " — " + ex.Message);
+        }
+    }
+
+    private bool HandlePickSyncDirectory()
+    {
+        if (!Environment.UserInteractive)
+        {
+            return false;
+        }
+
+        var current = ReadSyncDestPath();
+        using (var dialog = new FolderBrowserDialog())
+        {
+            dialog.Description = "选择构建后要同步到的测试目录（可选，不选则沿用默认）";
+            dialog.ShowNewFolderButton = true;
+            if (!string.IsNullOrWhiteSpace(current) && Directory.Exists(current))
+            {
+                dialog.SelectedPath = current;
+            }
+
+            if (dialog.ShowDialog() != DialogResult.OK)
+            {
+                Log("sync directory picker cancelled");
+                return true;
+            }
+
+            var picked = (dialog.SelectedPath ?? string.Empty).Trim();
+            if (picked.Length == 0)
+            {
+                return true;
+            }
+
+            WriteSyncDestPath(picked);
+            Log("sync directory updated: " + picked);
+            try
+            {
+                MessageBox.Show(
+                    "已保存同步目录：\r\n" + picked + "\r\n\r\n下次编译 Bootstrap 或运行 packaging_sync 时会优先使用该目录。",
+                    "HermesGo",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        }
+
+        return true;
+    }
+
+    private string ReadSyncDestPath()
+    {
+        foreach (var candidate in GetSyncDestFileCandidates())
+        {
+            try
+            {
+                if (!File.Exists(candidate))
+                {
+                    continue;
+                }
+
+                var text = (File.ReadAllText(candidate, Encoding.UTF8) ?? string.Empty).Trim();
+                if (text.Length > 0)
+                {
+                    return text;
+                }
+            }
+            catch
+            {
+                // Try the next candidate path.
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private void WriteSyncDestPath(string destRoot)
+    {
+        destRoot = (destRoot ?? string.Empty).Trim();
+        if (destRoot.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var candidate in GetSyncDestFileCandidates())
+        {
+            try
+            {
+                var parent = Path.GetDirectoryName(candidate);
+                if (!string.IsNullOrWhiteSpace(parent))
+                {
+                    Directory.CreateDirectory(parent);
+                }
+
+                File.WriteAllText(candidate, destRoot + Environment.NewLine, new UTF8Encoding(false));
+            }
+            catch (Exception ex)
+            {
+                Log("failed to write sync dest file " + candidate + ": " + ex.Message);
+            }
+        }
+    }
+
+    private IEnumerable<string> GetSyncDestFileCandidates()
+    {
+        yield return Path.Combine(_contentRoot, SyncDestFileName);
+        yield return Path.Combine(_root, SyncDestFileName);
+        yield return Path.Combine(_homeDir, SyncDestFileName);
     }
 
     private void OpenTextFile(string path)
@@ -4351,6 +4500,39 @@ internal sealed class HermesBootstrap
         return "powershell.exe";
     }
 
+    private void ApplyPortableLaunchEnvironment(ProcessStartInfo psi)
+    {
+        if (psi == null)
+        {
+            return;
+        }
+
+        SetLaunchEnv(psi, "HERMESGO_LAUNCHED_BY_EXE", "1");
+        SetLaunchEnv(psi, "HERMESGO_CONFIGURE_ALL", "1");
+        SetLaunchEnv(psi, "HERMESGO_STRICT_PORTABLE", "1");
+        SetLaunchEnv(psi, "HERMES_PORTABLE_STRICT", "1");
+        SetLaunchEnv(psi, "HERMESGO_SKIP_GLOBAL_PATH", "1");
+        SetLaunchEnv(psi, "HERMES_DISABLE_WSL", "1");
+        SetLaunchEnv(psi, "HERMES_PREFER_WINDOWS", "1");
+        SetLaunchEnv(psi, "HERMES_PORTABLE_APP_ROOT", _contentRoot);
+        SetLaunchEnv(psi, "HERMES_HOME", _homeDir);
+        SetLaunchEnv(psi, "PYTHONUTF8", "1");
+        SetLaunchEnv(psi, "PYTHONIOENCODING", "utf-8");
+        SetLaunchEnv(psi, "OLLAMA_MODELS", _ollamaModelsDir);
+    }
+
+    private static void SetLaunchEnv(ProcessStartInfo psi, string key, string value)
+    {
+        try
+        {
+            psi.EnvironmentVariables[key] = value;
+        }
+        catch
+        {
+            // Non-fatal when the host cannot mutate child environment.
+        }
+    }
+
     private void LaunchPackage(string[] args)
     {
         var script = ResolveScriptPath("Start-HermesGo.ps1");
@@ -4370,6 +4552,7 @@ internal sealed class HermesBootstrap
             CreateNoWindow = false,
             WindowStyle = ProcessWindowStyle.Normal,
         };
+        ApplyPortableLaunchEnvironment(psi);
 
         if (_planOnly)
         {
@@ -4409,6 +4592,7 @@ internal sealed class HermesBootstrap
             CreateNoWindow = false,
             WindowStyle = ProcessWindowStyle.Normal,
         };
+        ApplyPortableLaunchEnvironment(psi);
 
         TrackLaunchedProcess(Process.Start(psi));
         Log("launched HermesWebUI.bat");
@@ -4431,6 +4615,7 @@ internal sealed class HermesBootstrap
             CreateNoWindow = false,
             WindowStyle = ProcessWindowStyle.Normal,
         };
+        ApplyPortableLaunchEnvironment(psi);
 
         TrackLaunchedProcess(Process.Start(psi));
         Log("launched HermesDesktop.bat");
@@ -4781,6 +4966,7 @@ internal sealed class HermesBootstrap
         public event EventHandler<UiSuiteSelection> UiSuiteLaunchRequested;
         public event EventHandler OpenHomeRequested;
         public event EventHandler OpenLogsRequested;
+        public event EventHandler SyncDirectoryChangeRequested;
         public event EventHandler OpenCustomActionsRequested;
         public event EventHandler<LauncherOption> CustomActionRequested;
         public event EventHandler ExitRequested;
@@ -4826,15 +5012,16 @@ internal sealed class HermesBootstrap
             };
 
             Text = "HermesGo 启动器";
-            StartPosition = FormStartPosition.CenterScreen;
             AutoScaleMode = AutoScaleMode.None;
             AutoScaleDimensions = new SizeF(96F, 96F);
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = true;
             MinimizeBox = true;
             ShowInTaskbar = true;
-            ClientSize = GetScaledClientSize(1040, 720);
-            MinimumSize = GetScaledClientSize(960, 640);
+            var packageRoot = GetPackageRoot();
+            ClientSize = GetScaledClientSize(1040, 720, packageRoot);
+            MinimumSize = GetScaledClientSize(960, 640, packageRoot);
+            UiScreenAnchor.PrepareForm(this, packageRoot);
             AutoScroll = true;
             BackColor = Color.FromArgb(245, 242, 235);
             Font = new Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point);
@@ -5200,12 +5387,20 @@ internal sealed class HermesBootstrap
             return ResolvePackageContentRoot(exeDir);
         }
 
-        private static Size GetScaledClientSize(int baseWidth, int baseHeight)
+        private static Size GetScaledClientSize(int baseWidth, int baseHeight, string pathHint)
         {
-            var workingArea = Screen.PrimaryScreen.WorkingArea;
+            var workingArea = UiScreenAnchor.GetWorkingArea(pathHint);
             var width = Math.Max(1, Math.Min(baseWidth, workingArea.Width - 40));
             var height = Math.Max(1, Math.Min(baseHeight, workingArea.Height - 40));
             return new Size(width, height);
+        }
+
+        private void OnSyncDirectoryChangeRequested()
+        {
+            if (SyncDirectoryChangeRequested != null)
+            {
+                SyncDirectoryChangeRequested(this, EventArgs.Empty);
+            }
         }
 
         private static float GetDisplayScaleFactor()
@@ -5404,6 +5599,13 @@ internal sealed class HermesBootstrap
                 Description = "打开绿色版 logs 目录。",
                 Kind = "open-logs",
             });
+            builtIns.Add(new LauncherOption
+            {
+                Key = "pick-sync-dir",
+                Text = "更换同步目录（可选）",
+                Description = "选择构建后同步到的测试目录；不选则沿用默认目录。",
+                Kind = "pick-sync-dir",
+            });
 
             _launcherOptions.AddRange(builtIns);
             _launcherOptions.AddRange(LoadCustomLauncherOptions());
@@ -5509,6 +5711,12 @@ internal sealed class HermesBootstrap
             if (string.Equals(option.Key, "open-logs", StringComparison.OrdinalIgnoreCase))
             {
                 OnOpenLogsRequested();
+                return;
+            }
+
+            if (string.Equals(option.Key, "pick-sync-dir", StringComparison.OrdinalIgnoreCase))
+            {
+                OnSyncDirectoryChangeRequested();
                 return;
             }
 
@@ -5644,6 +5852,10 @@ internal sealed class HermesBootstrap
             else if (string.Equals(option.Key, "open-logs", StringComparison.OrdinalIgnoreCase))
             {
                 lines.Add("当前状态：会打开 logs 目录，不会启动 Hermes 主程序。");
+            }
+            else if (string.Equals(option.Key, "pick-sync-dir", StringComparison.OrdinalIgnoreCase))
+            {
+                lines.Add("当前状态：可更换构建同步目标目录；不选则沿用默认。");
             }
             else if (string.Equals(option.Key, "open-custom-actions", StringComparison.OrdinalIgnoreCase))
             {
@@ -6653,5 +6865,279 @@ internal sealed class HermesBootstrap
         public string SourceLabel { get { return _sourceLabel; } }
         public string Md5 { get { return _md5; } }
         public long Bytes { get { return _bytes; } }
+    }
+
+    private static class UiScreenAnchor
+    {
+        private static Screen _anchorScreen;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnum, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern bool MoveWindow(IntPtr hWnd, int x, int y, int nWidth, int nHeight, bool bRepaint);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        public static void Capture(string packageRoot)
+        {
+            _anchorScreen = TryScreenFromForeground()
+                ?? TryScreenFromPoint(Cursor.Position)
+                ?? TryScreenFromPath(packageRoot)
+                ?? SafePrimaryScreen();
+        }
+
+        public static Screen GetScreen(string pathHint)
+        {
+            var fromPath = TryScreenFromPath(pathHint);
+            if (fromPath != null)
+            {
+                return fromPath;
+            }
+
+            return _anchorScreen ?? SafePrimaryScreen();
+        }
+
+        public static Rectangle GetWorkingArea(string pathHint)
+        {
+            var screen = GetScreen(pathHint);
+            if (screen != null)
+            {
+                return screen.WorkingArea;
+            }
+
+            return new Rectangle(0, 0, 1280, 800);
+        }
+
+        public static void PrepareForm(Form form)
+        {
+            PrepareForm(form, null);
+        }
+
+        public static void PrepareForm(Form form, string pathHint)
+        {
+            if (form == null)
+            {
+                return;
+            }
+
+            var screen = GetScreen(pathHint);
+            if (screen == null)
+            {
+                form.StartPosition = FormStartPosition.CenterScreen;
+                return;
+            }
+
+            var area = screen.WorkingArea;
+            var size = form.ClientSize;
+            if (size.Width <= 0 || size.Height <= 0)
+            {
+                size = form.Size;
+            }
+
+            var x = area.Left + Math.Max(0, (area.Width - size.Width) / 2);
+            var y = area.Top + Math.Max(0, (area.Height - size.Height) / 2);
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = new Point(x, y);
+        }
+
+        public static int[] SnapshotExplorerProcessIds()
+        {
+            var ids = new List<int>();
+            Process[] processes = null;
+            try
+            {
+                processes = Process.GetProcessesByName("explorer");
+                foreach (var process in processes)
+                {
+                    try
+                    {
+                        ids.Add(process.Id);
+                    }
+                    catch
+                    {
+                        // Ignore inaccessible explorer instances.
+                    }
+                }
+            }
+            catch
+            {
+                // Explorer may be unavailable in restricted sessions.
+            }
+            finally
+            {
+                if (processes != null)
+                {
+                    foreach (var process in processes)
+                    {
+                        process.Dispose();
+                    }
+                }
+            }
+
+            return ids.ToArray();
+        }
+
+        public static void MoveNewExplorerWindowsToScreen(Screen screen, int[] beforeIds)
+        {
+            if (screen == null)
+            {
+                return;
+            }
+
+            Thread.Sleep(350);
+            var before = new HashSet<int>(beforeIds ?? new int[0]);
+            var current = SnapshotExplorerProcessIds();
+            var targetIds = new HashSet<int>();
+            foreach (var id in current)
+            {
+                if (!before.Contains(id))
+                {
+                    targetIds.Add(id);
+                }
+            }
+
+            if (targetIds.Count == 0)
+            {
+                return;
+            }
+
+            var area = screen.WorkingArea;
+            var targetX = area.Left + Math.Max(0, (area.Width - 960) / 2);
+            var targetY = area.Top + Math.Max(0, (area.Height - 640) / 2);
+            var moved = 0;
+
+            EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
+            {
+                if (!IsWindowVisible(hWnd))
+                {
+                    return true;
+                }
+
+                uint pid;
+                GetWindowThreadProcessId(hWnd, out pid);
+                if (!targetIds.Contains((int)pid))
+                {
+                    return true;
+                }
+
+                NativeRect rect;
+                if (!GetWindowRect(hWnd, out rect))
+                {
+                    return true;
+                }
+
+                var width = Math.Max(640, rect.Right - rect.Left);
+                var height = Math.Max(480, rect.Bottom - rect.Top);
+                if (MoveWindow(hWnd, targetX, targetY, width, height, true))
+                {
+                    moved++;
+                }
+
+                return true;
+            }, IntPtr.Zero);
+
+            if (moved == 0)
+            {
+                return;
+            }
+        }
+
+        private static Screen TryScreenFromForeground()
+        {
+            try
+            {
+                var handle = GetForegroundWindow();
+                if (handle != IntPtr.Zero)
+                {
+                    return Screen.FromHandle(handle);
+                }
+            }
+            catch
+            {
+                // Fall through to the next strategy.
+            }
+
+            return null;
+        }
+
+        private static Screen TryScreenFromPoint(Point point)
+        {
+            try
+            {
+                return Screen.FromPoint(point);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static Screen TryScreenFromPath(string pathHint)
+        {
+            if (string.IsNullOrWhiteSpace(pathHint))
+            {
+                return null;
+            }
+
+            try
+            {
+                var fullPath = Path.GetFullPath(pathHint);
+                if (Directory.Exists(fullPath))
+                {
+                    return Screen.FromPoint(Cursor.Position);
+                }
+            }
+            catch
+            {
+                // Ignore invalid path hints.
+            }
+
+            return null;
+        }
+
+        private static Screen SafePrimaryScreen()
+        {
+            try
+            {
+                if (Screen.PrimaryScreen != null)
+                {
+                    return Screen.PrimaryScreen;
+                }
+
+                var all = Screen.AllScreens;
+                if (all != null && all.Length > 0)
+                {
+                    return all[0];
+                }
+            }
+            catch
+            {
+                // Headless or broken display configuration.
+            }
+
+            return null;
+        }
     }
 }

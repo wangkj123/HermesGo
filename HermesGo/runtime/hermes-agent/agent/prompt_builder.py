@@ -195,7 +195,7 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "deepseek")
 
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
@@ -412,6 +412,49 @@ WSL_ENVIRONMENT_HINT = (
 )
 
 
+def _is_hermesgo_green_portable() -> bool:
+    """True when running from HermesGo green portable (env or app/.hermesgo-green)."""
+    if os.environ.get("HERMES_PORTABLE_APP_ROOT", "").strip():
+        return True
+    try:
+        from hermes_constants import get_portable_app_root
+
+        root = get_portable_app_root()
+        if root is not None and (root / ".hermesgo-green").is_file():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _hermesgo_green_web_search_hint() -> str:
+    """HermesGo slim: steer the model away from curl when web_search/ddgs is available."""
+    if not _is_hermesgo_green_portable():
+        return ""
+    try:
+        from tools.web_tools import _ddgs_available, _load_web_config, check_web_api_key
+    except Exception:
+        return ""
+    if not check_web_api_key():
+        return ""
+    backend = str((_load_web_config().get("backend") or "")).strip().lower()
+    if backend == "duckduckgo" or _ddgs_available():
+        backend_note = "DuckDuckGo via the web_search tool (no Firecrawl/Tavily API key)."
+    else:
+        backend_note = "the web_search tool with your configured web backend."
+    return (
+        "# HermesGo internet search\n"
+        "When you need to **find or look up information on the web** (news, docs, versions, facts), "
+        "you MUST call the **web_search** tool first (same turn — no planning-only reply).\n"
+        "Do NOT use `curl`, `wget`, `python3 -c` with urllib/requests, `execute_code`, or terminal "
+        "scripts to simulate search when **web_search** is in your tool list.\n"
+        "Do NOT use PowerShell `Invoke-WebRequest` to scrape search-result pages.\n"
+        "Use **terminal** only for: running project commands, fetching one specific URL the user "
+        "already provided, or local file/system work.\n"
+        f"This green package uses {backend_note}"
+    )
+
+
 def build_environment_hints() -> str:
     """Return environment-specific guidance for the system prompt.
 
@@ -419,6 +462,9 @@ def build_environment_hints() -> str:
     Returns an empty string when no special environment is detected.
     """
     hints: list[str] = []
+    green_web = _hermesgo_green_web_search_hint()
+    if green_web:
+        hints.append(green_web)
     if is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)
     return "\n\n".join(hints)

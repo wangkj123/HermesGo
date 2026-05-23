@@ -143,9 +143,13 @@ _apply_profile_override()
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
+from hermes_constants import ensure_hermes_green_windows_env, ensure_portable_hermes_home_env
 from hermes_cli.config import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
-load_hermes_dotenv(project_env=PROJECT_ROOT / '.env')
+
+ensure_portable_hermes_home_env()
+ensure_hermes_green_windows_env()
+load_hermes_dotenv(hermes_home=get_hermes_home(), project_env=PROJECT_ROOT / '.env')
 
 # Initialize centralized file logging early — all `hermes` subcommands
 # (chat, setup, gateway, config, etc.) write to agent.log + errors.log.
@@ -725,6 +729,9 @@ def cmd_chat(args):
             args.resume = resolved
         # If resolution fails, keep the original value — _init_agent will
         # report "Session not found" with the original input
+
+    # Dashboard/WebUI may save API keys after this process started — reload app/home/.env.
+    load_hermes_dotenv(hermes_home=get_hermes_home(), project_env=PROJECT_ROOT / '.env')
 
     # First-run guard: check if any provider is configured before launching
     if not _has_any_provider_configured():

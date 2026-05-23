@@ -537,6 +537,14 @@ try:
 except Exception:
     pass
 
+# HermesGo portable: host IDEs often export NO_COLOR=1 — keep gold/kawaii Rich theme.
+if os.environ.get("HERMES_FORCE_COLOR", "").strip() or os.environ.get("HERMES_PORTABLE_APP_ROOT", "").strip():
+    os.environ.pop("NO_COLOR", None)
+    os.environ.setdefault("FORCE_COLOR", "1")
+    if os.environ.get("TERM", "").strip().lower() in ("", "dumb"):
+        os.environ["TERM"] = "xterm-256color"
+    os.environ.setdefault("COLORTERM", "truecolor")
+
 # Initialize the skin engine from config
 try:
     from hermes_cli.skin_engine import init_skin_from_config

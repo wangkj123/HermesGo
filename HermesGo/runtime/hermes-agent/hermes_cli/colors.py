@@ -4,12 +4,27 @@ import os
 import sys
 
 
+def _portable_force_color() -> bool:
+    """HermesGo green: keep gold CLI theme even when the host sets NO_COLOR."""
+    if os.environ.get("HERMES_FORCE_COLOR", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if os.environ.get("HERMES_PORTABLE_APP_ROOT", "").strip():
+        return True
+    if os.environ.get("HERMESGO_STRICT_PORTABLE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    return False
+
+
 def should_use_color() -> bool:
     """Return True when colored output is appropriate.
 
     Respects the NO_COLOR environment variable (https://no-color.org/)
     and TERM=dumb, in addition to the existing TTY check.
     """
+    if _portable_force_color():
+        if not sys.stdout.isatty():
+            return False
+        return True
     if os.environ.get("NO_COLOR") is not None:
         return False
     if os.environ.get("TERM") == "dumb":

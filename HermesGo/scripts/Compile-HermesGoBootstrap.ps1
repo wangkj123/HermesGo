@@ -114,7 +114,27 @@ if ($env:HERMESGO_SKIP_TEST_SYNC -match '^(?i)(1|true|yes)$') {
         if (-not $pyLauncher) {
             throw "Python not found for packaging_sync.py"
         }
-        & $pyLauncher $syncPy
+        $syncDest = $env:HERMESGO_TEST_PACKAGE_ROOT
+        if (-not $syncDest) {
+            foreach ($candidate in @(
+                    (Join-Path $repoRoot "sync-dest.txt"),
+                    (Join-Path $repoRoot "HermesGo\sync-dest.txt"),
+                    (Join-Path $repoRoot "HermesGo\home\sync-dest.txt"),
+                    (Join-Path $repoRoot "HermesGo\app\sync-dest.txt"),
+                    (Join-Path $repoRoot "HermesGo\app\home\sync-dest.txt")
+                )) {
+                if (Test-Path -LiteralPath $candidate) {
+                    $syncDest = (Get-Content -LiteralPath $candidate -Encoding utf8 -TotalCount 1).Trim()
+                    if ($syncDest) { break }
+                }
+            }
+        }
+        $syncArgs = @($syncPy)
+        if ($syncDest) {
+            Write-Host "[Compile-HermesGoBootstrap] sync dest: $syncDest"
+            $syncArgs += @("--dest", $syncDest)
+        }
+        & $pyLauncher @syncArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Test package sync failed (exit $LASTEXITCODE). Run build_zip_slim.py after a full zip build."
         }

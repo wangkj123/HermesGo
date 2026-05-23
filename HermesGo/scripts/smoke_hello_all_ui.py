@@ -48,7 +48,8 @@ def _portable_env(app_root: str) -> dict[str, str]:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            k, v = k.strip(), v.strip().strip('"').strip("'")
+            k = k.strip().lstrip("\ufeff")
+            v = v.strip().strip('"').strip("'")
             if k and v:
                 env[k] = v
     return env

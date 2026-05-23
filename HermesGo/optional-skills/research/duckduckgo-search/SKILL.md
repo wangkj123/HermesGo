@@ -15,22 +15,22 @@ metadata:
 
 Free web search using DuckDuckGo. **No API key required.**
 
-Preferred when `web_search` is unavailable or unsuitable (for example when `FIRECRAWL_API_KEY` is not set). Can also be used as a standalone search path when DuckDuckGo results are specifically desired.
+**HermesGo green / when the `web_search` tool is available:** call **`web_search`** only. Do **not** use `curl`, `wget`, or raw `ddgs` in terminal for discovery.
+
+Use this skill's CLI path only when `web_search` is **not** in your tool list (for example when `FIRECRAWL_API_KEY` is not set and `web_search` was filtered out).
 
 ## Detection Flow
 
 Check what is actually available before choosing an approach:
 
+1. If **`web_search`** is available → use it (HermesGo routes it to DuckDuckGo when no paid API key).
+2. Else if `ddgs` CLI exists → `terminal` + `ddgs` (not `curl`).
+3. Else do not use `curl` to fake search; ask the user or use browser tools if enabled.
+
 ```bash
-# Check CLI availability
+# Check CLI availability (only when web_search is absent)
 command -v ddgs >/dev/null && echo "DDGS_CLI=installed" || echo "DDGS_CLI=missing"
 ```
-
-Decision tree:
-1. If `ddgs` CLI is installed, prefer `terminal` + `ddgs`
-2. If `ddgs` CLI is missing, do not assume `execute_code` can import `ddgs`
-3. If the user wants DuckDuckGo specifically, install `ddgs` first in the relevant environment
-4. Otherwise fall back to built-in web/browser tools
 
 Important runtime note:
 - Terminal and `execute_code` are separate runtimes
